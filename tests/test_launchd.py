@@ -48,11 +48,45 @@ class LaunchdTest(unittest.TestCase):
                 ):
                     launchd_environment(config)
 
+    def test_direct_tokens_do_not_require_environment_variables(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "fix.toml"
+            value = (
+                self._config_text()
+                .replace('token_env = "FIX_TOKEN"', 'token = "server-direct"')
+                .replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token = "github-direct"',
+                )
+                .replace("enabled = true", "enabled = false")
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+            with patch.dict("os.environ", {}, clear=True):
+                environment = launchd_environment(config)
+        self.assertEqual(set(environment), {"PATH"})
+
+    def test_missing_github_environment_falls_back_without_blocking_install(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(Path(directory))
+            values = {
+                "FIX_TOKEN": "intake",
+                "FIX_DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
+            }
+            with patch.dict("os.environ", values, clear=True):
+                environment = launchd_environment(config)
+        self.assertNotIn("FIX_GITHUB_TOKEN", environment)
+
     @staticmethod
     def _config(root: Path):
         path = root / "fix.toml"
-        path.write_text(
-            """
+        path.write_text(LaunchdTest._config_text(), encoding="utf-8")
+        return load_config(path)
+
+    @staticmethod
+    def _config_text() -> str:
+        return """
 version = 1
 state_dir = ".state"
 [server]
@@ -67,10 +101,7 @@ test_commands = []
 [repositories.discord]
 enabled = true
 webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"
-""",
-            encoding="utf-8",
-        )
-        return load_config(path)
+"""
 
 
 if __name__ == "__main__":

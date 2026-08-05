@@ -9,6 +9,7 @@ import threading
 from .codex_agent import CodexAgent
 from .command import CommandRunner
 from .config import AppConfig, RepositoryConfig
+from .credentials import resolve_github_credential
 from .errors import FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
@@ -396,11 +397,7 @@ class FixWorker:
         environment: dict[str, str],
         branch: str,
     ) -> None:
-        token = os.environ.get(repository.github_token_env)
-        if not token:
-            raise FixAgentError(
-                f"required environment variable is not set: {repository.github_token_env}"
-            )
+        token = self._github_token(repository)
         push_environment = dict(environment)
         expected_urls = {
             f"https://github.com/{repository.github}",
@@ -439,11 +436,7 @@ class FixWorker:
     def _publish_pull_request(
         self, repository: RepositoryConfig, job: Job, branch: str
     ) -> str:
-        token = os.environ.get(repository.github_token_env)
-        if not token:
-            raise FixAgentError(
-                f"required environment variable is not set: {repository.github_token_env}"
-            )
+        token = self._github_token(repository)
         environment = os.environ.copy()
         environment["GH_TOKEN"] = token
         existing = self.runner.run(
@@ -503,3 +496,13 @@ class FixWorker:
         if not url:
             raise FixAgentError("gh pr create returned no URL")
         return url
+
+    def _github_token(self, repository: RepositoryConfig) -> str:
+        resolved = resolve_github_credential(
+            repository.github_token,
+            repository.github_token_env,
+            self.runner,
+        )
+        if resolved is None:  # pragma: no cover - required resolver contract
+            raise FixAgentError("GitHub authentication is unavailable")
+        return resolved

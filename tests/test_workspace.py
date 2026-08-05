@@ -92,7 +92,7 @@ github = "owner/repo"
 target_branch = "main"
 local_path = "{repository}"
 publish_mode = "{publish_mode}"
-github_token_env = "FIX_GITHUB_TOKEN"
+github_token = "test-only-token"
 test_commands = []
 """,
             encoding="utf-8",

@@ -5,6 +5,7 @@ state_dir = ".fix-agent"
 [server]
 host = "127.0.0.1"
 port = 7081
+# token = "replace-with-a-long-random-secret"
 token_env = "CODE_FIX_TOKEN"
 max_body_bytes = 1048576
 
@@ -15,7 +16,8 @@ target_branch = "dev"
 local_path = "../Matrix_Mobile_V2"
 remote = "origin"
 publish_mode = "direct"
-github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
+# github_token = "replace-with-a-repository-scoped-token"
+# github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []
 additional_instructions = ""
 commit_message_template = "fix: resolve review finding {fingerprint_short}"

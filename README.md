@@ -18,7 +18,22 @@ export MATRIX_MOBILE_FIX_DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/.
 .venv/bin/fix-agent serve --config fix-agent.toml
 ```
 
-서버는 기본값으로 `127.0.0.1:7081`에서 실행된다. `/reviews`는 Bearer token이 있는 `version = 1` 리뷰 이벤트를 받고 `/health`는 서버 상태를 반환한다. 같은 장비에서 연동한다면 서버와 수신 token 없이 `fix-agent submit`으로 이벤트를 전달할 수도 있다. 다만 push와 PR 생성에는 저장소별 GitHub token이 필요하다.
+서버는 기본값으로 `127.0.0.1:7081`에서 실행된다. `/reviews`는 Bearer token이 있는 `version = 1` 리뷰 이벤트를 받고 `/health`는 서버 상태를 반환한다. 같은 장비에서 연동한다면 서버와 수신 token 없이 `fix-agent submit`으로 이벤트를 전달할 수도 있다. push와 PR 생성은 TOML 직접 token, 저장소별 환경 변수, PC의 `gh auth` 인증 순으로 GitHub 인증을 선택한다.
+
+HTTP 수신 token은 TOML 직접값과 환경 변수 중 하나를 선택한다. TOML에 `server.token`을 넣으면 `server.token_env`를 같이 적지 않는다. GitHub 인증은 `github_token`, `github_token_env`의 실제 값, `gh auth token --hostname github.com` 순으로 찾는다. PC에서 `gh auth login`을 완료했다면 GitHub token 설정을 생략할 수 있다.
+
+```toml
+[server]
+token = "CODE_FIX_TOKEN으로 쓸 긴 난수"
+
+[[repositories]]
+# 다른 저장소 설정 생략
+github_token = "저장소 쓰기 권한 GitHub token"
+```
+
+`CODE_FIX_TOKEN`은 외부에서 발급받는 값이 아니다. HTTP 송신자와 fix agent가 같이 아는 공유 비밀값으로, 기술적으로는 임의의 비어 있지 않은 문자열이면 된다. 추측 공격을 막으려면 `openssl rand -hex 32`로 생성한 64자 난수를 사용한다. `fix-agent submit`만 쓰고 `serve`를 실행하지 않으면 수신 token이 필요 없다.
+
+직접 token이 든 설정은 Git에 commit하지 않는다. `.gitignore`에 포함된 `fix-agent.local.toml`을 쓰고 권한을 `0600`으로 제한하는 방식이 안전하다.
 
 ```bash
 curl http://127.0.0.1:7081/health

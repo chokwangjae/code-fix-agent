@@ -77,6 +77,73 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(FixAgentError, "must be an HTTP URL"):
                 load_config(path)
 
+    def test_loads_direct_server_and_github_tokens_without_repr_leak(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = (
+                self._config()
+                .replace(
+                    'token_env = "FIX_TOKEN"',
+                    'token = "server-secret-value"',
+                )
+                .replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token = "github-secret-value"',
+                )
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+        self.assertEqual(config.server.token, "server-secret-value")
+        self.assertIsNone(config.server.token_env)
+        self.assertEqual(
+            config.repositories[0].github_token, "github-secret-value"
+        )
+        self.assertIsNone(config.repositories[0].github_token_env)
+        self.assertNotIn("server-secret-value", repr(config))
+        self.assertNotIn("github-secret-value", repr(config))
+
+    def test_rejects_two_server_token_sources(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'token_env = "FIX_TOKEN"',
+                'token_env = "FIX_TOKEN"\ntoken = "direct-value"',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "must not set both"):
+                load_config(path)
+
+    def test_rejects_missing_server_token_source(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace('token_env = "FIX_TOKEN"', "")
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "token or token_env"):
+                load_config(path)
+
+    def test_rejects_two_github_token_sources(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'github_token_env = "FIX_GITHUB_TOKEN"',
+                'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                'github_token = "direct-value"',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "must not set both"):
+                load_config(path)
+
+    def test_allows_repository_to_fall_back_to_gh_auth(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'github_token_env = "FIX_GITHUB_TOKEN"', ""
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+        self.assertIsNone(config.repositories[0].github_token)
+        self.assertIsNone(config.repositories[0].github_token_env)
+
     @staticmethod
     def _config() -> str:
         return """

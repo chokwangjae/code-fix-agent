@@ -4,13 +4,13 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
-import os
 import threading
 from typing import Any
 from urllib.parse import urlsplit
 
 from .config import AppConfig
 from .contract import parse_review_event
+from .credentials import resolve_credential
 from .errors import FixAgentError
 from .state import StateStore
 from .worker import FixWorker
@@ -36,11 +36,9 @@ class IntakeApplication:
 
 
 def serve(config: AppConfig) -> None:
-    token = os.environ.get(config.server.token_env)
-    if not token:
-        raise FixAgentError(
-            f"required environment variable is not set: {config.server.token_env}"
-        )
+    token = resolve_credential(
+        config.server.token, config.server.token_env, "server token"
+    )
     application = IntakeApplication(config)
     worker = FixWorker(config)
     worker_thread = threading.Thread(

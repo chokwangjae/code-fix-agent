@@ -20,6 +20,8 @@ max_attempts = 1
 max_remote_merge_attempts = 3
 ```
 
+`github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
+
 `remote`와 `target_branch`가 최신 코드 조회와 결과 push 위치를 정한다. 위 설정의 작업 경로는 다음과 같다.
 
 ```text

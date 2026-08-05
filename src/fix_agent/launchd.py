@@ -18,22 +18,31 @@ _PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 def launchd_environment(config: AppConfig) -> dict[str, str]:
     environment = {"PATH": _PATH}
-    names = {config.server.token_env} | {
-        repository.github_token_env for repository in config.repositories
+    required_names: set[str] = set()
+    if config.server.token_env:
+        required_names.add(config.server.token_env)
+    optional_names = {
+        repository.github_token_env
+        for repository in config.repositories
+        if repository.github_token_env
     }
     for repository in config.repositories:
         discord = repository.discord
         if not discord.enabled:
             continue
         if discord.webhook_url_env:
-            names.add(discord.webhook_url_env)
+            required_names.add(discord.webhook_url_env)
         if discord.webhook_token_env:
-            names.add(discord.webhook_token_env)
-    for name in sorted(names):
+            required_names.add(discord.webhook_token_env)
+    for name in sorted(required_names):
         value = os.environ.get(name)
         if not value:
             raise FixAgentError(f"required environment variable is not set: {name}")
         environment[name] = value
+    for name in sorted(optional_names):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
     return environment
 
 

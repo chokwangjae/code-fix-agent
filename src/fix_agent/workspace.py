@@ -10,6 +10,7 @@ import re
 
 from .command import CommandRunner
 from .config import RepositoryConfig
+from .credentials import resolve_github_credential
 from .errors import FixAgentError
 from .state import Job, StateStore
 
@@ -57,6 +58,8 @@ class FixWorkspace:
         self._created = False
         self.base_commit: str | None = None
         self.cleanup_complete: bool | None = None
+        self._github_token_loaded = False
+        self._github_token: str | None = None
 
     @property
     def safe_environment(self) -> dict[str, str]:
@@ -67,7 +70,12 @@ class FixWorkspace:
             if name.endswith(("_TOKEN", "_SECRET", "_PASSWORD"))
             or "WEBHOOK" in name
         }
-        for name in _CREDENTIAL_ENVIRONMENT | credential_names | {self.repository.github_token_env}:
+        configured_names = (
+            {self.repository.github_token_env}
+            if self.repository.github_token_env
+            else set()
+        )
+        for name in _CREDENTIAL_ENVIRONMENT | credential_names | configured_names:
             environment.pop(name, None)
         environment["GIT_TERMINAL_PROMPT"] = "0"
         return environment
@@ -205,7 +213,15 @@ class FixWorkspace:
     @property
     def network_environment(self) -> dict[str, str]:
         environment = self.safe_environment
-        token = os.environ.get(self.repository.github_token_env)
+        if not self._github_token_loaded:
+            self._github_token = resolve_github_credential(
+                self.repository.github_token,
+                self.repository.github_token_env,
+                self.runner,
+                required=False,
+            )
+            self._github_token_loaded = True
+        token = self._github_token
         if not token:
             return environment
         credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()

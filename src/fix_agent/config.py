@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fnmatch
 from pathlib import Path, PurePosixPath
 import re
@@ -23,14 +23,15 @@ _PUBLISH_MODES = ("pull_request", "direct")
 class ServerConfig:
     host: str
     port: int
-    token_env: str
+    token: str | None = field(repr=False)
+    token_env: str | None
     max_body_bytes: int = 1_048_576
 
 
 @dataclass(frozen=True)
 class DiscordConfig:
     enabled: bool
-    webhook_url: str | None
+    webhook_url: str | None = field(repr=False)
     webhook_url_env: str | None
     webhook_token_env: str | None
     timeout_seconds: int
@@ -80,7 +81,8 @@ class RepositoryConfig:
     local_path: Path
     remote: str
     publish_mode: str
-    github_token_env: str
+    github_token: str | None = field(repr=False)
+    github_token_env: str | None
     discord: DiscordConfig
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
@@ -161,12 +163,8 @@ def _server(raw: Any) -> ServerConfig:
     max_body_bytes = _positive_integer(
         raw.get("max_body_bytes", 1_048_576), "server.max_body_bytes"
     )
-    return ServerConfig(
-        host,
-        port,
-        _environment_name(raw, "token_env", "server"),
-        max_body_bytes,
-    )
+    token, token_env = _credential_source(raw, "token", "token_env", "server")
+    return ServerConfig(host, port, token, token_env, max_body_bytes)
 
 
 def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
@@ -212,6 +210,9 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
     execution = raw.get("execution", {})
     if not isinstance(execution, dict):
         raise FixAgentError(f"{context}.execution must be a table")
+    github_token, github_token_env = _credential_source(
+        raw, "github_token", "github_token_env", context, required=False
+    )
     return RepositoryConfig(
         id=_required_string(raw, "id", context),
         github=github,
@@ -219,7 +220,8 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         local_path=_resolve_path(base, _required_string(raw, "local_path", context)),
         remote=remote,
         publish_mode=publish_mode,
-        github_token_env=_environment_name(raw, "github_token_env", context),
+        github_token=github_token,
+        github_token_env=github_token_env,
         discord=_discord(raw.get("discord"), context),
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
@@ -395,6 +397,31 @@ def _optional_environment_name(value: Any, context: str) -> str | None:
     if not isinstance(value, str) or not _ENVIRONMENT_NAME.fullmatch(value):
         raise FixAgentError(f"{context} must be an environment variable name")
     return value
+
+
+def _credential_source(
+    raw: dict[str, Any],
+    direct_key: str,
+    environment_key: str,
+    context: str,
+    *,
+    required: bool = True,
+) -> tuple[str | None, str | None]:
+    direct = raw.get(direct_key)
+    if direct is not None and (not isinstance(direct, str) or not direct):
+        raise FixAgentError(f"{context}.{direct_key} must be a non-empty string")
+    environment = _optional_environment_name(
+        raw.get(environment_key), f"{context}.{environment_key}"
+    )
+    if direct and environment:
+        raise FixAgentError(
+            f"{context} must not set both {direct_key} and {environment_key}"
+        )
+    if required and not direct and not environment:
+        raise FixAgentError(
+            f"{context} must set {direct_key} or {environment_key}"
+        )
+    return direct, environment
 
 
 def _positive_integer(raw: Any, context: str, *, maximum: int | None = None) -> int:
