@@ -24,6 +24,8 @@ class IntakeApplication:
         event = parse_review_event(payload)
         repository = self.config.repository(event.repository, event.branch)
         with StateStore(self.config.state_dir) as state:
+            if repository.discord.enabled:
+                state.initialize_discord_cursor(repository.id)
             result = state.accept(repository, event)
         return {
             "job_ids": list(result.job_ids),

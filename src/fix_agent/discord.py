@@ -65,6 +65,8 @@ def _is_notifiable(event: JobEvent) -> bool:
     return event.event_type in _NOTIFIABLE_EVENTS or (
         event.event_type == "status_changed"
         and event.status in {"completed", "rejected", "failed"}
+    ) or (
+        event.event_type == "job_created" and event.status == "skipped"
     )
 
 
@@ -83,6 +85,8 @@ def _presentation(event: JobEvent) -> tuple[str, int]:
         return "✅ 코드 수정 완료", PASS_COLOR
     if event.status == "rejected":
         return "ℹ️ 코드 수정 제외", INFO_COLOR
+    if event.status == "skipped":
+        return "ℹ️ 코드 수정 정책 제외", INFO_COLOR
     return "❌ 코드 수정 실패", FAIL_COLOR
 
 

@@ -12,6 +12,8 @@ python3 -m venv .venv
 export CODE_FIX_TOKEN='replace-with-a-secret'
 export MATRIX_MOBILE_FIX_GITHUB_TOKEN='repository-scoped-token'
 export TESTSQUARE_FABLE_FIX_GITHUB_TOKEN='repository-scoped-token'
+# fix-agent.toml에서 해당 저장소의 Discord enabled를 true로 바꾼 경우
+export MATRIX_MOBILE_FIX_DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
 
 .venv/bin/fix-agent serve --config fix-agent.toml
 ```
@@ -33,7 +35,14 @@ curl http://127.0.0.1:7081/health
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
 - finding별 최신 target 기반 detached worktree, 원격 이동 시 merge·재검증
 - append-only 작업 event 기록과 Discord notifier용 순차 event ID
-- `code-review-agent` 규격 호환 Discord payload formatter 포함, 실제 발송 비활성
+- `code-review-agent` 규격 호환 저장소별 Discord 알림과 실패 재시도
+
+Discord 알림은 `fix-agent.toml`의 저장소별 `[repositories.discord]`에서 켠다. 현재 기본 설정은 실제 발송을 막기 위해 `enabled = false`다. `true`로 바꾼 뒤 `webhook_url_env`에 적힌 환경 변수에 웹훅 URL을 넣으면 `serve`와 `run-once`가 작업 이벤트를 전송한다. 수동 전송·재시도는 다음 명령으로 확인한다.
+
+```bash
+.venv/bin/fix-agent notify-once --config fix-agent.toml
+.venv/bin/fix-agent notify-once --config fix-agent.toml --force
+```
 
 현재 `code-review-agent`와 자동 트리거는 연결하지 않았다. 승인 없이 사용할 수 있는 입력 방식은 HTTP API와 `fix-agent submit`이다.
 

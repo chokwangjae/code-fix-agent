@@ -8,6 +8,7 @@ import sqlite3
 
 from .config import load_config
 from .errors import FixAgentError
+from .notify import DiscordNotifier
 from .server import IntakeApplication, serve
 from .state import StateStore
 from .worker import FixWorker
@@ -43,6 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run-once", help="process one queued fix job")
     run_parser.add_argument("--config", required=True, type=Path)
+
+    notify_parser = subparsers.add_parser(
+        "notify-once", help="deliver pending Discord job events"
+    )
+    notify_parser.add_argument("--config", required=True, type=Path)
+    notify_parser.add_argument("--max-events", type=int, default=100)
+    notify_parser.add_argument(
+        "--force", action="store_true", help="ignore the stored retry delay"
+    )
     return parser
 
 
@@ -67,6 +77,16 @@ def main(argv: list[str] | None = None) -> int:
             processed = FixWorker(config).run_once()
             print("processed one job" if processed else "no queued jobs")
             return 0
+        if args.command == "notify-once":
+            if args.max_events < 1:
+                raise FixAgentError("--max-events must be a positive integer")
+            notifier = DiscordNotifier(config)
+            notifier.initialize_cursors()
+            result = notifier.dispatch_pending(
+                force=args.force, max_events=args.max_events
+            )
+            print(json.dumps(asdict(result), ensure_ascii=False))
+            return 1 if result.failed else 0
         if args.command == "events":
             if args.job_id is not None and args.job_id < 1:
                 raise FixAgentError("--job-id must be a positive integer")

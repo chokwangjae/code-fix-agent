@@ -20,6 +20,11 @@ test_commands = []
 additional_instructions = ""
 commit_message_template = "fix: resolve review finding {fingerprint_short}"
 
+[repositories.discord]
+enabled = true
+webhook_url_env = "MATRIX_FIX_DISCORD_WEBHOOK_URL"
+timeout_seconds = 30
+
 [repositories.execution]
 command_timeout_seconds = 1800
 max_attempts = 1

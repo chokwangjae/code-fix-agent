@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
@@ -59,6 +59,17 @@ class JobEvent:
     created_at: str
 
 
+@dataclass(frozen=True)
+class DiscordCursor:
+    repository_id: str
+    last_event_id: int
+    failed_event_id: int | None
+    attempts: int
+    last_error: str | None
+    next_attempt_at: str | None
+    updated_at: str
+
+
 class StateStore:
     def __init__(self, state_dir: Path) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +110,19 @@ class StateStore:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (repository, branch, fingerprint)
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discord_cursors (
+                repository_id TEXT PRIMARY KEY,
+                last_event_id INTEGER NOT NULL DEFAULT 0,
+                failed_event_id INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                next_attempt_at TEXT,
+                updated_at TEXT NOT NULL
             )
             """
         )
@@ -249,6 +273,123 @@ class StateStore:
     ) -> None:
         with self.connection:
             self._insert_event(job_id, event_type, message, details or {})
+
+    def discord_cursor(self, repository_id: str) -> DiscordCursor:
+        row = self.connection.execute(
+            "SELECT * FROM discord_cursors WHERE repository_id = ?",
+            (repository_id,),
+        ).fetchone()
+        if row is not None:
+            return DiscordCursor(**dict(row))
+        return DiscordCursor(repository_id, 0, None, 0, None, None, _now())
+
+    def initialize_discord_cursor(self, repository_id: str) -> DiscordCursor:
+        """Start a new notifier after existing events to avoid historical floods."""
+
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(MAX(event.id), 0) AS latest_event_id
+            FROM job_events AS event
+            JOIN jobs AS job ON job.id = event.job_id
+            WHERE job.repository_id = ?
+            """,
+            (repository_id,),
+        ).fetchone()
+        latest_event_id = int(row["latest_event_id"]) if row is not None else 0
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO discord_cursors (
+                    repository_id, last_event_id, failed_event_id, attempts,
+                    last_error, next_attempt_at, updated_at
+                ) VALUES (?, ?, NULL, 0, NULL, NULL, ?)
+                ON CONFLICT (repository_id) DO NOTHING
+                """,
+                (repository_id, latest_event_id, now),
+            )
+        return self.discord_cursor(repository_id)
+
+    def next_discord_event(
+        self, repository_id: str
+    ) -> tuple[Job, JobEvent] | None:
+        cursor = self.discord_cursor(repository_id)
+        event_row = self.connection.execute(
+            """
+            SELECT event.*
+            FROM job_events AS event
+            JOIN jobs AS job ON job.id = event.job_id
+            WHERE job.repository_id = ? AND event.id > ?
+            ORDER BY event.id
+            LIMIT 1
+            """,
+            (repository_id, cursor.last_event_id),
+        ).fetchone()
+        if event_row is None:
+            return None
+        job_row = self.connection.execute(
+            "SELECT * FROM jobs WHERE id = ?", (event_row["job_id"],)
+        ).fetchone()
+        if job_row is None:  # pragma: no cover - protected by the join
+            raise sqlite3.DatabaseError("Discord event job does not exist")
+        return Job(**dict(job_row)), JobEvent(**dict(event_row))
+
+    def advance_discord_cursor(self, repository_id: str, event_id: int) -> None:
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO discord_cursors (
+                    repository_id, last_event_id, failed_event_id, attempts,
+                    last_error, next_attempt_at, updated_at
+                ) VALUES (?, ?, NULL, 0, NULL, NULL, ?)
+                ON CONFLICT (repository_id) DO UPDATE SET
+                    last_event_id = CASE
+                        WHEN excluded.last_event_id > discord_cursors.last_event_id
+                        THEN excluded.last_event_id
+                        ELSE discord_cursors.last_event_id
+                    END,
+                    failed_event_id = NULL,
+                    attempts = 0,
+                    last_error = NULL,
+                    next_attempt_at = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (repository_id, event_id, now),
+            )
+
+    def fail_discord_event(
+        self, repository_id: str, event_id: int, error: str, delay_seconds: int
+    ) -> DiscordCursor:
+        current = self.discord_cursor(repository_id)
+        attempts = current.attempts + 1 if current.failed_event_id == event_id else 1
+        now = datetime.now(timezone.utc)
+        next_attempt_at = (now + timedelta(seconds=delay_seconds)).isoformat()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO discord_cursors (
+                    repository_id, last_event_id, failed_event_id, attempts,
+                    last_error, next_attempt_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (repository_id) DO UPDATE SET
+                    failed_event_id = excluded.failed_event_id,
+                    attempts = excluded.attempts,
+                    last_error = excluded.last_error,
+                    next_attempt_at = excluded.next_attempt_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    repository_id,
+                    current.last_event_id,
+                    event_id,
+                    attempts,
+                    error[:20_000],
+                    next_attempt_at,
+                    now.isoformat(),
+                ),
+            )
+        return self.discord_cursor(repository_id)
 
     def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
         limits = {repository.id: repository.max_attempts for repository in repositories}

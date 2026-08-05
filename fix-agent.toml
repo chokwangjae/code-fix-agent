@@ -33,6 +33,11 @@ test_commands = [
   ["env", "MATRIX_ASSIGNED_AGENT=structure-sync-checker", "bash", "tools/harness/structure-sync-gate.sh", "record", "--cached"],
 ]
 
+[repositories.discord]
+enabled = false
+webhook_url_env = "MATRIX_MOBILE_FIX_DISCORD_WEBHOOK_URL"
+timeout_seconds = 30
+
 [repositories.execution]
 command_timeout_seconds = 3600
 max_attempts = 1
@@ -82,6 +87,11 @@ test_commands = [
   ["node", "tools/harness/cli.mjs", "validate", "run"],
   ["node", "tools/harness/cli.mjs", "validate", "check"],
 ]
+
+[repositories.discord]
+enabled = false
+webhook_url_env = "TESTSQUARE_FABLE_FIX_DISCORD_WEBHOOK_URL"
+timeout_seconds = 30
 
 [repositories.execution]
 command_timeout_seconds = 3600

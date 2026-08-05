@@ -21,6 +21,14 @@ def launchd_environment(config: AppConfig) -> dict[str, str]:
     names = {config.server.token_env} | {
         repository.github_token_env for repository in config.repositories
     }
+    for repository in config.repositories:
+        discord = repository.discord
+        if not discord.enabled:
+            continue
+        if discord.webhook_url_env:
+            names.add(discord.webhook_url_env)
+        if discord.webhook_token_env:
+            names.add(discord.webhook_token_env)
     for name in sorted(names):
         value = os.environ.get(name)
         if not value:

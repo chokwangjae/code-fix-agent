@@ -17,6 +17,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.target_branch, "main")
         self.assertEqual(repository.publish_mode, "direct")
         self.assertEqual(repository.max_remote_merge_attempts, 4)
+        self.assertTrue(repository.discord.enabled)
+        self.assertEqual(repository.discord.webhook_url_env, "FIX_DISCORD_WEBHOOK_URL")
+        self.assertEqual(repository.discord.timeout_seconds, 20)
         self.assertEqual(repository.additional_instructions, "Preserve the public API.")
         self.assertEqual(repository.policy.max_changed_files, 3)
         self.assertEqual(repository.policy.skip_reason("Critical", "src/a.py", "sha256:" + "a" * 64), "severity is not enabled: Critical")
@@ -41,6 +44,39 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(FixAgentError, "publish_mode"):
                 load_config(path)
 
+    def test_enabled_discord_requires_one_webhook_source(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"', ""
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "webhook_url or webhook_url_env"):
+                load_config(path)
+
+    def test_discord_rejects_two_webhook_sources(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"',
+                'webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"\n'
+                'webhook_url = "https://discord.example/webhook"',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "must not set both"):
+                load_config(path)
+
+    def test_discord_rejects_webhook_without_host(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"',
+                'webhook_url = "https://"',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "must be an HTTP URL"):
+                load_config(path)
+
     @staticmethod
     def _config() -> str:
         return """
@@ -57,6 +93,10 @@ publish_mode = "direct"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = [["python3", "-m", "unittest"]]
 additional_instructions = "Preserve the public API."
+[repositories.discord]
+enabled = true
+webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"
+timeout_seconds = 20
 [repositories.execution]
 max_remote_merge_attempts = 4
 [repositories.policy]

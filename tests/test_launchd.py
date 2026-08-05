@@ -15,7 +15,11 @@ class LaunchdTest(unittest.TestCase):
             config = self._config(root)
             with patch.dict(
                 "os.environ",
-                {"FIX_TOKEN": "intake", "FIX_GITHUB_TOKEN": "github"},
+                {
+                    "FIX_TOKEN": "intake",
+                    "FIX_GITHUB_TOKEN": "github",
+                    "FIX_DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
+                },
                 clear=True,
             ):
                 environment = launchd_environment(config)
@@ -29,12 +33,19 @@ class LaunchdTest(unittest.TestCase):
         self.assertEqual(payload["ProgramArguments"][1], "serve")
         self.assertTrue(payload["KeepAlive"])
         self.assertEqual(environment["FIX_GITHUB_TOKEN"], "github")
+        self.assertEqual(
+            environment["FIX_DISCORD_WEBHOOK_URL"],
+            "https://discord.example/webhook",
+        )
 
     def test_requires_all_configured_tokens(self) -> None:
         with TemporaryDirectory() as directory:
             config = self._config(Path(directory))
             with patch.dict("os.environ", {}, clear=True):
-                with self.assertRaisesRegex(FixAgentError, "FIX_GITHUB_TOKEN|FIX_TOKEN"):
+                with self.assertRaisesRegex(
+                    FixAgentError,
+                    "FIX_DISCORD_WEBHOOK_URL|FIX_GITHUB_TOKEN|FIX_TOKEN",
+                ):
                     launchd_environment(config)
 
     @staticmethod
@@ -53,6 +64,9 @@ branch = "main"
 local_path = "repo"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = []
+[repositories.discord]
+enabled = true
+webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"
 """,
             encoding="utf-8",
         )

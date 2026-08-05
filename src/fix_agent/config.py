@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import FixAgentError
 
@@ -24,6 +25,15 @@ class ServerConfig:
     port: int
     token_env: str
     max_body_bytes: int = 1_048_576
+
+
+@dataclass(frozen=True)
+class DiscordConfig:
+    enabled: bool
+    webhook_url: str | None
+    webhook_url_env: str | None
+    webhook_token_env: str | None
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class RepositoryConfig:
     remote: str
     publish_mode: str
     github_token_env: str
+    discord: DiscordConfig
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
     commit_message_template: str
@@ -209,6 +220,7 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         remote=remote,
         publish_mode=publish_mode,
         github_token_env=_environment_name(raw, "github_token_env", context),
+        discord=_discord(raw.get("discord"), context),
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
         commit_message_template=commit_message_template.strip(),
@@ -224,6 +236,47 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
             f"{context}.execution.max_remote_merge_attempts",
         ),
         policy=_policy(raw.get("policy", {}), context),
+    )
+
+
+def _discord(raw: Any, context: str) -> DiscordConfig:
+    context += ".discord"
+    if raw is None:
+        return DiscordConfig(False, None, None, None, 30)
+    if not isinstance(raw, dict):
+        raise FixAgentError(f"{context} must be a table")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise FixAgentError(f"{context}.enabled must be a boolean")
+    webhook_url = raw.get("webhook_url")
+    if webhook_url is not None:
+        if not isinstance(webhook_url, str):
+            raise FixAgentError(f"{context}.webhook_url must be an HTTP URL")
+        parsed_url = urlsplit(webhook_url)
+        if parsed_url.scheme not in {"https", "http"} or not parsed_url.netloc:
+            raise FixAgentError(f"{context}.webhook_url must be an HTTP URL")
+    webhook_url_env = _optional_environment_name(
+        raw.get("webhook_url_env"), f"{context}.webhook_url_env"
+    )
+    webhook_token_env = _optional_environment_name(
+        raw.get("webhook_token_env"), f"{context}.webhook_token_env"
+    )
+    if webhook_url and webhook_url_env:
+        raise FixAgentError(
+            f"{context} must not set both webhook_url and webhook_url_env"
+        )
+    if enabled and not (webhook_url or webhook_url_env):
+        raise FixAgentError(
+            f"{context} must set webhook_url or webhook_url_env when enabled"
+        )
+    return DiscordConfig(
+        enabled,
+        webhook_url,
+        webhook_url_env,
+        webhook_token_env,
+        _positive_integer(
+            raw.get("timeout_seconds", 30), f"{context}.timeout_seconds"
+        ),
     )
 
 
@@ -333,6 +386,14 @@ def _environment_name(raw: dict[str, Any], key: str, context: str) -> str:
     value = _required_string(raw, key, context)
     if not _ENVIRONMENT_NAME.fullmatch(value):
         raise FixAgentError(f"{context}.{key} must be an environment variable name")
+    return value
+
+
+def _optional_environment_name(value: Any, context: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _ENVIRONMENT_NAME.fullmatch(value):
+        raise FixAgentError(f"{context} must be an environment variable name")
     return value
 
 

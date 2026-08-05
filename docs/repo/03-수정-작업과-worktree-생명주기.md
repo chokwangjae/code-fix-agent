@@ -244,7 +244,7 @@ git -C /configured/local_path worktree list --porcelain
 .venv/bin/fix-agent jobs --config fix-agent.toml --json
 ```
 
-## event log와 Discord 연동 준비
+## event log와 Discord 알림
 
 `job_events`는 삭제·수정하지 않는 append-only 로그다. 각 row는 다음 필드를 가진다.
 
@@ -267,7 +267,7 @@ git -C /configured/local_path worktree list --porcelain
   --json
 ```
 
-Discord notifier처럼 전체 event를 순차 소비하는 프로세스는 마지막 전달 ID 다음부터 조회한다.
+외부 소비자는 마지막 처리 ID 다음부터 조회할 수 있다.
 
 ```bash
 .venv/bin/fix-agent events \
@@ -277,9 +277,9 @@ Discord notifier처럼 전체 event를 순차 소비하는 프로세스는 마�
   --json
 ```
 
-notifier는 Discord 전송 성공 뒤 마지막 event ID를 별도 checkpoint로 저장한다. 실패하면 같은 `--after-id`로 다시 읽어 at-least-once 전달하고 Discord 메시지에는 `event.id`를 포함해 중복을 판별한다.
+내장 notifier는 저장소별 `discord_cursors`에서 마지막 처리 ID를 관리한다. Discord가 HTTP 2xx를 반환한 뒤에만 커서를 전진한다. 실패하면 같은 event를 재시도하며 Discord 메시지에는 `event.id`를 넣어 중복을 판별한다.
 
-`src/fix_agent/discord.py`는 `code-review-agent`의 Discord 형식에 맞춘 순수 formatter만 제공한다.
+`src/fix_agent/discord.py`는 `code-review-agent`의 Discord 형식에 맞춰 payload를 만들고 `src/fix_agent/notify.py`가 저장소별 웹훅으로 전송한다.
 
 - embed payload와 `Content-Type: application/json` 전제
 - `username = "Code Fix Agent"`
@@ -289,11 +289,9 @@ notifier는 Discord 전송 성공 뒤 마지막 event ID를 별도 checkpoint로
 - event ID, job ID, repository, branch, finding과 구조화 세부 정보 포함
 - embed 전체 약 5,500자 이내 제한
 
-기본 알림 후보는 target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·`failed` 상태다. 내부 진행 event는 formatter가 빈 payload를 반환한다.
+기본 알림 후보는 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·`failed` 상태다. 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
 
-현재 webhook URL 설정, HTTP 요청, 재시도와 전달 checkpoint 저장 기능은 구현하지 않았다. formatter를 호출하는 production 경로도 없으므로 Discord로 메시지가 전송되지 않는다. 실제 발송 기능은 별도 승인 작업에서 추가하고 credential 격리 규칙을 유지한다.
-
-향후 sender는 `code-review-agent`와 같은 운영 규칙을 따라야 한다.
+sender는 `code-review-agent`와 같은 운영 규칙을 따른다.
 
 - 저장소별 webhook 분리
 - 설정 파일의 URL 또는 URL 환경 변수 중 하나만 허용
@@ -303,7 +301,9 @@ notifier는 Discord 전송 성공 뒤 마지막 event ID를 별도 checkpoint로
 - 전송 성공 뒤에만 event ID checkpoint 전진
 - 여러 payload 중 하나라도 실패하면 checkpoint 유지 후 같은 event부터 재시도
 
-이 항목은 향후 구현 계약이며 현재 설정 키나 실행 동작이 아니다.
+재시도 간격은 5초, 30초, 2분, 10분이며 이후에는 10분으로 유지한다. 전송 실패와 누락된 웹훅 환경 변수는 `discord_cursors`에 기록하고 수정 작업의 최종 상태는 바꾸지 않는다. worker가 없을 때는 `fix-agent notify-once`로 처리하고, `--force`를 붙이면 저장된 다음 재시도 시각을 무시한다. 처음 활성화한 저장소는 기존 마지막 event에서 시작해 과거 메시지를 일괄 발송하지 않는다.
+
+설정과 환경 변수 예시는 [리뷰 에이전트 연동 가이드](01-리뷰-에이전트-연동-가이드.md)의 Discord 작업 알림 절을 따른다.
 
 ## 주요 event 순서
 

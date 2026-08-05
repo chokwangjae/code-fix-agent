@@ -51,6 +51,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(payload[0]["details"], {"n": 1})
         self.assertNotIn("details_json", payload[0])
 
+    def test_notify_once_reports_no_delivery_when_discord_is_disabled(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fix.toml"
+            config_path.write_text(StateTest._config(), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                result = main(["notify-once", "--config", str(config_path)])
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"delivered": 0, "skipped": 0, "failed": 0, "deferred": 0},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

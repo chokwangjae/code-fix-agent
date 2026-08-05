@@ -10,6 +10,7 @@ from .codex_agent import CodexAgent
 from .command import CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .errors import FixAgentError
+from .notify import DiscordNotifier
 from .state import Job, StateStore
 from .workspace import FixWorkspace
 
@@ -24,12 +25,15 @@ class FixWorker:
         self.config = config
         self.runner = runner or CommandRunner()
         self.agent = agent or CodexAgent(self.runner, config.codex_executable)
+        self.notifier = DiscordNotifier(config)
+        self.notifier.initialize_cursors()
         self._stop = threading.Event()
 
     def run_once(self) -> bool:
         with StateStore(self.config.state_dir) as state:
             job = state.claim_next(self.config.repositories)
         if job is None:
+            self._dispatch_notifications()
             return False
         try:
             self._process(job)
@@ -37,6 +41,7 @@ class FixWorker:
             with StateStore(self.config.state_dir) as state:
                 state.mark_failed(job.id, str(exc))
             print(f"job {job.id} failed: {exc}")
+        self._dispatch_notifications()
         return True
 
     def run_forever(self, poll_seconds: float = 2.0) -> None:
@@ -46,6 +51,15 @@ class FixWorker:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _dispatch_notifications(self) -> None:
+        try:
+            result = self.notifier.dispatch_pending()
+        except Exception as exc:
+            print(f"Discord notification dispatch failed: {exc}")
+            return
+        if result.failed:
+            print("Discord notification delivery failed; retry is scheduled")
 
     def _process(self, job: Job) -> None:
         repository = self.config.repository_by_id(job.repository_id)
