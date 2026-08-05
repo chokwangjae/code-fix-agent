@@ -18,7 +18,7 @@
 - 아래 구조를 그대로 사용.
 
 ```text
-feat <type>: title
+feat (<type>): title
 
 무엇:
 왜:
