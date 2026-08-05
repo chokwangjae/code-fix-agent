@@ -16,7 +16,7 @@ export TESTSQUARE_FABLE_FIX_GITHUB_TOKEN='repository-scoped-token'
 .venv/bin/fix-agent serve --config fix-agent.toml
 ```
 
-서버는 기본값으로 `127.0.0.1:7081`에서 실행된다. `/reviews`는 Bearer token이 있는 `version = 1` 리뷰 이벤트를 받고 `/health`는 서버 상태를 반환한다.
+서버는 기본값으로 `127.0.0.1:7081`에서 실행된다. `/reviews`는 Bearer token이 있는 `version = 1` 리뷰 이벤트를 받고 `/health`는 서버 상태를 반환한다. 같은 장비에서 연동한다면 서버와 수신 token 없이 `fix-agent submit`으로 이벤트를 전달할 수도 있다. 다만 push와 PR 생성에는 저장소별 GitHub token이 필요하다.
 
 ```bash
 curl http://127.0.0.1:7081/health
@@ -35,7 +35,8 @@ curl http://127.0.0.1:7081/health
 
 ## 문서
 
-- [리뷰 에이전트 연동 가이드](docs/repo/01-리뷰-에이전트-연동-가이드.md): 설치, 이벤트 계약, 수동·HTTP 입력, 작업 상태와 연동 조건
+- [리뷰 에이전트 연동 가이드](docs/repo/01-리뷰-에이전트-연동-가이드.md): 설치, 로컬·HTTP 연결, 작업 상태와 운영 조건
+- [리뷰 이벤트 v1 계약](docs/repo/02-리뷰-이벤트-v1-계약.md): 필드, fingerprint, 응답, 오류, 재시도와 호환성 규칙
 
 ## 검증
 
