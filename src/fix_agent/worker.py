@@ -76,6 +76,7 @@ class FixWorker:
 
             self.agent.apply_fix(repository, job, workspace.path, environment)
             summary = workspace.validate_diff()
+            workspace.stage_for_harness()
             tests = self._run_tests(repository, workspace.path, environment)
             with StateStore(self.config.state_dir) as state:
                 state.record_tests(job.id, tests)

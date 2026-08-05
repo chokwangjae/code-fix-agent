@@ -12,12 +12,13 @@ cp fix-agent.example.toml fix-agent.local.toml
 chmod 600 fix-agent.local.toml
 ```
 
-`fix-agent.local.toml`에 저장소와 환경 변수 이름을 설정한다. 수신 token을 환경 변수에 넣고 서버를 실행한다.
+저장소에 포함된 `fix-agent.toml`에는 현재 `Matrix_Mobile_V2`와 `TestSquare-Fable` 설정이 들어 있다. 다른 저장소를 연결할 때는 `fix-agent.example.toml`을 복사해 로컬 설정을 만든다. 설정 파일에 저장소와 환경 변수 이름을 적은 뒤 수신 token을 환경 변수에 넣고 서버를 실행한다.
 
 ```bash
 export CODE_FIX_TOKEN='replace-with-a-secret'
-export MATRIX_FIX_GITHUB_TOKEN='repository-scoped-token'
-.venv/bin/fix-agent serve --config fix-agent.local.toml
+export MATRIX_MOBILE_FIX_GITHUB_TOKEN='repository-scoped-token'
+export TESTSQUARE_FABLE_FIX_GITHUB_TOKEN='repository-scoped-token'
+.venv/bin/fix-agent serve --config fix-agent.toml
 ```
 
 서버는 기본값으로 `127.0.0.1:7081`의 `/reviews`에서 `version = 1` 리뷰 이벤트를 받는다. `Authorization: Bearer <token>` 헤더가 필요하다. `/health`는 인증 없이 상태만 반환한다. 서버 내부 작업 루프가 SQLite의 `queued` 작업을 한 건씩 처리한다.
@@ -26,7 +27,7 @@ macOS에서는 LaunchAgent를 설치할 수 있다. 설치 명령을 실행하�
 
 ```bash
 .venv/bin/fix-agent-launchd \
-  --config /absolute/path/fix-agent.local.toml \
+  --config /Users/brokenclaw/hermes-workspace/code-fix-agent/fix-agent.toml \
   --install
 ```
 

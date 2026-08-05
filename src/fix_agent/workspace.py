@@ -300,6 +300,11 @@ class FixWorkspace:
         ).stdout.strip()
         return branch, commit
 
+    def stage_for_harness(self) -> None:
+        self.runner.run(
+            ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
+        )
+
     def close(self) -> None:
         if self._created:
             self.runner.run(
