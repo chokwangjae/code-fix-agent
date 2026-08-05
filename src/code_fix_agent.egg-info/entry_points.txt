@@ -1,0 +1,2 @@
+[console_scripts]
+fix-agent = fix_agent.cli:main

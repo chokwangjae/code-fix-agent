@@ -1,0 +1,38 @@
+version = 1
+state_dir = ".fix-agent"
+
+[server]
+host = "127.0.0.1"
+port = 7081
+token_env = "CODE_FIX_TOKEN"
+max_body_bytes = 1048576
+
+[[repositories]]
+id = "matrix-mobile-v2"
+github = "inswave/Matrix_Mobile_V2"
+branch = "dev"
+local_path = "../Matrix_Mobile_V2"
+remote = "origin"
+github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
+test_commands = []
+additional_instructions = ""
+
+[repositories.execution]
+command_timeout_seconds = 1800
+max_attempts = 1
+
+[repositories.policy]
+allowed_severities = ["Major", "Minor"]
+allowed_paths = ["**"]
+denied_paths = [
+  ".github/workflows/**",
+  "**/*.p12",
+  "**/*.mobileprovision",
+  "**/.env*",
+]
+skipped_paths = []
+skipped_fingerprints = []
+max_changed_files = 10
+max_changed_lines = 500
+allow_new_files = false
+allow_deletions = false

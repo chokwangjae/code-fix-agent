@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: code-fix-agent
+Version: 0.1.0
+Summary: Apply validated code review findings and open pull requests
+Requires-Python: >=3.11
