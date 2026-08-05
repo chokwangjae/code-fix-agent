@@ -1,6 +1,6 @@
 # 코드 수정 에이전트
 
-검증된 코드 리뷰 이슈를 다시 확인한 뒤 대상 프로젝트 규칙에 맞춰 수정하고 PR을 만든다. finding 사실 여부와 수정 결과의 판단 사유를 SQLite에 남기며, 정책·테스트·HEAD 검사를 통과하지 못한 작업은 push하지 않는다.
+검증된 코드 리뷰 이슈를 다시 확인한 뒤 대상 프로젝트 규칙에 맞춰 수정하고 설정된 remote와 target branch에 반영한다. finding 사실 여부, 원격 merge와 수정 결과의 판단 사유를 SQLite에 남기며 정책과 테스트를 통과하지 못한 작업은 push하지 않는다.
 
 ## 빠른 시작
 
@@ -21,6 +21,7 @@ export TESTSQUARE_FABLE_FIX_GITHUB_TOKEN='repository-scoped-token'
 ```bash
 curl http://127.0.0.1:7081/health
 .venv/bin/fix-agent jobs --config fix-agent.toml --json
+.venv/bin/fix-agent events --config fix-agent.toml --after-id 0 --json
 ```
 
 ## 처리 범위
@@ -29,7 +30,10 @@ curl http://127.0.0.1:7081/health
 - Major·Minor finding 처리, Critical 기본 제외
 - 대상 `AGENTS.md`, 추가 지침과 저장소 하네스 적용
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
-- 전용 `autofix/` branch와 PR 생성, 직접 merge 금지
+- 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
+- finding별 최신 target 기반 detached worktree, 원격 이동 시 merge·재검증
+- append-only 작업 event 기록과 Discord notifier용 순차 event ID
+- `code-review-agent` 규격 호환 Discord payload formatter 포함, 실제 발송 비활성
 
 현재 `code-review-agent`와 자동 트리거는 연결하지 않았다. 승인 없이 사용할 수 있는 입력 방식은 HTTP API와 `fix-agent submit`이다.
 
@@ -37,6 +41,7 @@ curl http://127.0.0.1:7081/health
 
 - [리뷰 에이전트 연동 가이드](docs/repo/01-리뷰-에이전트-연동-가이드.md): 설치, 로컬·HTTP 연결, 작업 상태와 운영 조건
 - [리뷰 이벤트 v1 계약](docs/repo/02-리뷰-이벤트-v1-계약.md): 필드, fingerprint, 응답, 오류, 재시도와 호환성 규칙
+- [수정 작업과 worktree 생명주기](docs/repo/03-수정-작업과-worktree-생명주기.md): 최신 target 동기화, merge 충돌 해결, 작업별 push, 정리와 event log
 
 ## 검증
 

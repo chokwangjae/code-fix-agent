@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "code-fix-agent"
 version = "0.1.0"
-description = "Apply validated code review findings and open pull requests"
+description = "Apply validated code review findings and publish verified fixes"
 requires-python = ">=3.11"
 
 [project.scripts]

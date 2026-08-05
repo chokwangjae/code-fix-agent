@@ -14,6 +14,9 @@ class ConfigTest(unittest.TestCase):
             config = load_config(path)
         repository = config.repositories[0]
         self.assertEqual(config.server.port, 7081)
+        self.assertEqual(repository.target_branch, "main")
+        self.assertEqual(repository.publish_mode, "direct")
+        self.assertEqual(repository.max_remote_merge_attempts, 4)
         self.assertEqual(repository.additional_instructions, "Preserve the public API.")
         self.assertEqual(repository.policy.max_changed_files, 3)
         self.assertEqual(repository.policy.skip_reason("Critical", "src/a.py", "sha256:" + "a" * 64), "severity is not enabled: Critical")
@@ -26,6 +29,18 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(FixAgentError, "repository-relative"):
                 load_config(path)
 
+    def test_rejects_unknown_publish_mode(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            path.write_text(
+                self._config().replace(
+                    'publish_mode = "direct"', 'publish_mode = "merge"'
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(FixAgentError, "publish_mode"):
+                load_config(path)
+
     @staticmethod
     def _config() -> str:
         return """
@@ -36,11 +51,14 @@ token_env = "FIX_TOKEN"
 [[repositories]]
 id = "repo"
 github = "owner/repo"
-branch = "main"
+target_branch = "main"
 local_path = "repo"
+publish_mode = "direct"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = [["python3", "-m", "unittest"]]
 additional_instructions = "Preserve the public API."
+[repositories.execution]
+max_remote_merge_attempts = 4
 [repositories.policy]
 allowed_severities = ["Major", "Minor"]
 allowed_paths = ["src/**"]

@@ -13,7 +13,9 @@ from .errors import FixAgentError
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SEVERITIES = ("Critical", "Major", "Minor")
+_PUBLISH_MODES = ("pull_request", "direct")
 
 
 @dataclass(frozen=True)
@@ -64,16 +66,23 @@ class RepositoryPolicy:
 class RepositoryConfig:
     id: str
     github: str
-    branch: str
+    target_branch: str
     local_path: Path
     remote: str
+    publish_mode: str
     github_token_env: str
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
     commit_message_template: str
     command_timeout_seconds: int
     max_attempts: int
+    max_remote_merge_attempts: int
     policy: RepositoryPolicy
+
+    @property
+    def branch(self) -> str:
+        """Return the configured review and publish target branch."""
+        return self.target_branch
 
 
 @dataclass(frozen=True)
@@ -121,7 +130,8 @@ def load_config(path: Path) -> AppConfig:
     )
     identifiers = [repository.id for repository in repositories]
     coordinates = [
-        (repository.github.casefold(), repository.branch) for repository in repositories
+        (repository.github.casefold(), repository.target_branch)
+        for repository in repositories
     ]
     if len(identifiers) != len(set(identifiers)):
         raise FixAgentError("repository ids must be unique")
@@ -175,17 +185,29 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
             f"{context}.commit_message_template contains an invalid placeholder"
         ) from exc
     remote = raw.get("remote", "origin")
-    if not isinstance(remote, str) or not remote:
-        raise FixAgentError(f"{context}.remote must be a non-empty string")
+    if not isinstance(remote, str) or not _GIT_REMOTE.fullmatch(remote):
+        raise FixAgentError(f"{context}.remote must be a simple Git remote name")
+    target_branch = raw.get("target_branch", raw.get("branch"))
+    if not isinstance(target_branch, str) or not target_branch:
+        raise FixAgentError(f"{context}.target_branch must be a non-empty string")
+    legacy_branch = raw.get("branch")
+    if legacy_branch is not None and legacy_branch != target_branch:
+        raise FixAgentError(f"{context}.branch and target_branch must match")
+    publish_mode = raw.get("publish_mode", "pull_request")
+    if publish_mode not in _PUBLISH_MODES:
+        raise FixAgentError(
+            f"{context}.publish_mode must be one of: {', '.join(_PUBLISH_MODES)}"
+        )
     execution = raw.get("execution", {})
     if not isinstance(execution, dict):
         raise FixAgentError(f"{context}.execution must be a table")
     return RepositoryConfig(
         id=_required_string(raw, "id", context),
         github=github,
-        branch=_required_string(raw, "branch", context),
+        target_branch=target_branch,
         local_path=_resolve_path(base, _required_string(raw, "local_path", context)),
         remote=remote,
+        publish_mode=publish_mode,
         github_token_env=_environment_name(raw, "github_token_env", context),
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
@@ -196,6 +218,10 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         ),
         max_attempts=_positive_integer(
             execution.get("max_attempts", 1), f"{context}.execution.max_attempts"
+        ),
+        max_remote_merge_attempts=_positive_integer(
+            execution.get("max_remote_merge_attempts", 3),
+            f"{context}.execution.max_remote_merge_attempts",
         ),
         policy=_policy(raw.get("policy", {}), context),
     )

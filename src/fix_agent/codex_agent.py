@@ -32,12 +32,14 @@ class CodexAgent:
         job: Job,
         workspace: Path,
         environment: dict[str, str],
+        workspace_base: str | None = None,
     ) -> Decision:
         prompt = f"""# Independent finding validation
 
 Repository: {job.repository}
 Branch: {job.branch}
 Target commit: {job.target_commit}
+Workspace base: {workspace_base or job.target_commit}
 Introducing commit: {job.introducing_commit}
 Finding file: {job.file}:{job.line}
 Severity: {job.severity}
@@ -65,6 +67,7 @@ files. Return only JSON in this form:
         job: Job,
         workspace: Path,
         environment: dict[str, str],
+        workspace_base: str | None = None,
     ) -> None:
         rules = repository.additional_instructions or "No additional instructions."
         prompt = f"""# Apply one validated code fix
@@ -72,6 +75,7 @@ files. Return only JSON in this form:
 Repository: {job.repository}
 Branch: {job.branch}
 Target commit: {job.target_commit}
+Workspace base: {workspace_base or job.target_commit}
 Finding fingerprint: {job.fingerprint}
 Finding: {job.file}:{job.line}
 
@@ -99,15 +103,17 @@ Repository-specific additional instructions:
         job: Job,
         workspace: Path,
         environment: dict[str, str],
+        workspace_base: str | None = None,
     ) -> Decision:
         prompt = f"""# Validate one code fix
 
 Repository: {job.repository}
 Target commit: {job.target_commit}
+Workspace base: {workspace_base or job.target_commit}
 Original finding: {job.file}:{job.line}
 Original cause: {job.cause}
 
-Inspect the working tree diff against {job.target_commit}. Read applicable
+Inspect the working tree diff against {workspace_base or job.target_commit}. Read applicable
 AGENTS.md files and relevant callers and tests. Confirm that the original failure
 path is removed and that the diff introduces no concrete regression. Do not edit
 files. Return only JSON in this form:
@@ -116,6 +122,48 @@ files. Return only JSON in this form:
 """
         return self._decision(
             repository, workspace, environment, "read-only", prompt, "resolved"
+        )
+
+    def resolve_merge_conflicts(
+        self,
+        repository: RepositoryConfig,
+        job: Job,
+        workspace: Path,
+        environment: dict[str, str],
+        previous_base: str,
+        current_target: str,
+        conflict_files: tuple[str, ...],
+    ) -> Decision:
+        files = "\n".join(f"- {path}" for path in conflict_files)
+        prompt = f"""# Resolve target branch merge conflicts
+
+Repository: {job.repository}
+Target branch: {repository.remote}/{repository.target_branch}
+Previous workspace base: {previous_base}
+Current target commit: {current_target}
+Original finding: {job.file}:{job.line}
+Original cause: {job.cause}
+
+The worktree contains an in-progress Git merge between the validated fix and the
+latest target branch. Resolve only these unmerged files:
+
+{files}
+
+Read every applicable AGENTS.md. Inspect the index stages and both changes. Keep
+the latest target branch behavior unless doing so restores the original defect,
+and preserve the smallest valid fix. Remove every conflict marker. Do not run git
+add, commit, push, create a branch, modify Git configuration, or access credentials.
+Return only JSON after editing:
+
+{{"resolved": true, "reason": "files resolved and why both change intents remain"}}
+"""
+        return self._decision(
+            repository,
+            workspace,
+            environment,
+            "workspace-write",
+            prompt,
+            "resolved",
         )
 
     def _decision(

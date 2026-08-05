@@ -11,9 +11,10 @@ max_body_bytes = 1048576
 [[repositories]]
 id = "matrix-mobile-v2"
 github = "inswave/Matrix_Mobile_V2"
-branch = "dev"
+target_branch = "dev"
 local_path = "../Matrix_Mobile_V2"
 remote = "origin"
+publish_mode = "direct"
 github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []
 additional_instructions = ""
@@ -22,6 +23,7 @@ commit_message_template = "fix: resolve review finding {fingerprint_short}"
 [repositories.execution]
 command_timeout_seconds = 1800
 max_attempts = 1
+max_remote_merge_attempts = 3
 
 [repositories.policy]
 allowed_severities = ["Major", "Minor"]

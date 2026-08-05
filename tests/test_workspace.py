@@ -76,7 +76,9 @@ class WorkspaceTest(unittest.TestCase):
         return repository, baseline, target
 
     @staticmethod
-    def _config(root: Path, repository: Path):
+    def _config(
+        root: Path, repository: Path, publish_mode: str = "pull_request"
+    ):
         path = root / "fix.toml"
         path.write_text(
             f"""
@@ -87,8 +89,9 @@ token_env = "FIX_TOKEN"
 [[repositories]]
 id = "repo"
 github = "owner/repo"
-branch = "main"
+target_branch = "main"
 local_path = "{repository}"
+publish_mode = "{publish_mode}"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = []
 """,

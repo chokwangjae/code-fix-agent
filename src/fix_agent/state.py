@@ -48,6 +48,17 @@ class IntakeResult:
     skipped: int
 
 
+@dataclass(frozen=True)
+class JobEvent:
+    id: int
+    job_id: int
+    event_type: str
+    status: str
+    message: str
+    details_json: str
+    created_at: str
+
+
 class StateStore:
     def __init__(self, state_dir: Path) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +100,26 @@ class StateStore:
                 updated_at TEXT NOT NULL,
                 UNIQUE (repository, branch, fingerprint)
             )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS job_events_job_id_id
+            ON job_events (job_id, id)
             """
         )
         columns = {
@@ -153,12 +184,27 @@ class StateStore:
                            WHERE repository = ? AND branch = ? AND fingerprint = ?""",
                         (event.repository, event.branch, finding.fingerprint),
                     ).fetchone()
+                    if row is not None:
+                        self._insert_event(
+                            row["id"],
+                            "duplicate_received",
+                            "review finding matched an existing job",
+                            {"fingerprint": finding.fingerprint},
+                        )
                 else:
                     created += 1
                     skipped += int(status == "skipped")
                     row = self.connection.execute(
                         "SELECT id FROM jobs WHERE rowid = last_insert_rowid()"
                     ).fetchone()
+                    if row is not None:
+                        self._insert_event(
+                            row["id"],
+                            "job_created",
+                            f"job created with status {status}",
+                            {"skip_reason": reason} if reason else {},
+                            status=status,
+                        )
                 if row is not None:
                     job_ids.append(row["id"])
         return IntakeResult(tuple(job_ids), created, duplicate, skipped)
@@ -168,6 +214,41 @@ class StateStore:
             "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return tuple(Job(**dict(row)) for row in rows)
+
+    def events(
+        self, job_id: int | None = None, after_id: int = 0, limit: int = 500
+    ) -> tuple[JobEvent, ...]:
+        if job_id is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM job_events
+                WHERE id > ?
+                ORDER BY id
+                LIMIT ?
+                """,
+                (after_id, limit),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM job_events
+                WHERE job_id = ? AND id > ?
+                ORDER BY id
+                LIMIT ?
+                """,
+                (job_id, after_id, limit),
+            ).fetchall()
+        return tuple(JobEvent(**dict(row)) for row in rows)
+
+    def record_event(
+        self,
+        job_id: int,
+        event_type: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        with self.connection:
+            self._insert_event(job_id, event_type, message, details or {})
 
     def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
         limits = {repository.id: repository.max_attempts for repository in repositories}
@@ -204,6 +285,13 @@ class StateStore:
             claimed = self.connection.execute(
                 "SELECT * FROM jobs WHERE id = ?", (row["id"],)
             ).fetchone()
+            self._insert_event(
+                row["id"],
+                "job_claimed",
+                "worker claimed the job",
+                {"attempt": row["attempts"] + 1},
+                status="validating",
+            )
         return Job(**dict(claimed)) if claimed is not None else None
 
     def record_precheck(self, job_id: int, valid: bool, reason: str) -> None:
@@ -217,6 +305,9 @@ class StateStore:
     def record_tests(self, job_id: int, results: list[dict[str, object]]) -> None:
         self._update(job_id, "testing", tests_json=json.dumps(results, ensure_ascii=False))
 
+    def mark_testing(self, job_id: int) -> None:
+        self._update(job_id, "testing")
+
     def record_postcheck(self, job_id: int, valid: bool, reason: str) -> None:
         self._update(
             job_id,
@@ -228,7 +319,7 @@ class StateStore:
     def mark_pushed(self, job_id: int, branch: str, commit: str) -> None:
         self._update(job_id, "pushed", fix_branch=branch, result_commit=commit)
 
-    def mark_completed(self, job_id: int, pr_url: str) -> None:
+    def mark_completed(self, job_id: int, pr_url: str | None) -> None:
         self._update(job_id, "completed", pr_url=pr_url)
 
     def mark_failed(self, job_id: int, error: str) -> None:
@@ -259,6 +350,50 @@ class StateStore:
             )
             if cursor.rowcount != 1:
                 raise sqlite3.DatabaseError(f"job does not exist: {job_id}")
+            event_details = {
+                key: value for key, value in values.items() if key != "tests_json"
+            }
+            if "tests_json" in values:
+                event_details["tests_recorded"] = True
+            self._insert_event(
+                job_id,
+                "status_changed",
+                f"job status changed to {status}",
+                event_details,
+                status=status,
+            )
+
+    def _insert_event(
+        self,
+        job_id: int,
+        event_type: str,
+        message: str,
+        details: dict[str, object],
+        *,
+        status: str | None = None,
+    ) -> None:
+        if status is None:
+            row = self.connection.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError(f"job does not exist: {job_id}")
+            status = row["status"]
+        self.connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, event_type, status, message, details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                event_type,
+                status,
+                message,
+                json.dumps(details, ensure_ascii=False, sort_keys=True),
+                _now(),
+            ),
+        )
 
     def close(self) -> None:
         self.connection.close()

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -14,22 +15,93 @@ class FakeAgent:
     def __init__(self, valid: bool = True) -> None:
         self.valid = valid
 
-    def validate_finding(self, repository, job, workspace, environment):
+    def validate_finding(
+        self, repository, job, workspace, environment, workspace_base=None
+    ):
         return Decision(self.valid, "The caller reaches the defective branch.")
 
-    def apply_fix(self, repository, job, workspace, environment):
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
         (workspace / job.file).write_text("fixed\n", encoding="utf-8")
 
-    def validate_fix(self, repository, job, workspace, environment):
+    def validate_fix(
+        self, repository, job, workspace, environment, workspace_base=None
+    ):
         return Decision(True, "The caller now receives the failure.")
 
 
+class MovingTargetAgent(FakeAgent):
+    def __init__(self, repository_path: Path, *, conflict: bool) -> None:
+        super().__init__()
+        self.repository_path = repository_path
+        self.conflict = conflict
+
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
+        super().apply_fix(repository, job, workspace, environment, workspace_base)
+        if self.conflict:
+            (self.repository_path / job.file).write_text("remote\n", encoding="utf-8")
+        else:
+            (self.repository_path / "src/remote.py").write_text(
+                "remote\n", encoding="utf-8"
+            )
+        subprocess.run(
+            ["git", "add", "--all"], cwd=self.repository_path, check=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "remote update"],
+            cwd=self.repository_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=self.repository_path,
+            check=True,
+            capture_output=True,
+        )
+
+    def resolve_merge_conflicts(
+        self,
+        repository,
+        job,
+        workspace,
+        environment,
+        previous_base,
+        current_target,
+        conflict_files,
+    ):
+        (workspace / job.file).write_text("combined\n", encoding="utf-8")
+        return Decision(True, "Preserved the remote update and the validated fix.")
+
+
+class PerJobAgent(FakeAgent):
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
+        (workspace / job.file).write_text(
+            f"fixed-{job.fingerprint[-1]}\n", encoding="utf-8"
+        )
+
+
 class LocalWorker(FixWorker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pushed_branches = []
+        self.pull_request_calls = 0
+
     def _push(self, repository, workspace, environment, branch):
-        return None
+        self.pushed_branches.append(branch)
 
     def _publish_pull_request(self, repository, job, branch):
+        self.pull_request_calls += 1
         return "https://github.com/owner/repo/pull/1"
+
+
+class LocalDirectPushWorker(LocalWorker):
+    def _push(self, repository, workspace, environment, branch):
+        self.pushed_branches.append(branch)
+        self.runner.run(
+            ["git", "push", repository.remote, f"HEAD:refs/heads/{branch}"],
+            cwd=workspace,
+            environment=environment,
+        )
 
 
 class WorkerTest(unittest.TestCase):
@@ -62,8 +134,129 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(rejected.precheck_status, "invalid")
         self.assertIsNone(rejected.result_commit)
 
+    def test_direct_mode_pushes_each_job_to_target_branch_without_pr(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(
+                root, repository_path, publish_mode="direct"
+            )
+            self._queue(config, baseline, target)
+            worker = LocalWorker(config, CommandRunner(), FakeAgent())
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                event_types = [event.event_type for event in state.events(completed.id)]
+        self.assertEqual(completed.status, "completed")
+        self.assertIsNone(completed.pr_url)
+        self.assertEqual(worker.pushed_branches, ["main"])
+        self.assertEqual(worker.pull_request_calls, 0)
+        self.assertIn("worktree_created", event_types)
+        self.assertIn("worktree_removed", event_types)
+        self.assertIn("push_completed", event_types)
+
+    def test_merges_moved_target_and_revalidates_before_push(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(root, repository_path)
+            self._queue(config, baseline, target)
+            worker = LocalWorker(
+                config,
+                CommandRunner(),
+                MovingTargetAgent(repository_path, conflict=False),
+            )
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                event_types = [event.event_type for event in state.events(completed.id)]
+            parents = subprocess.run(
+                ["git", "rev-list", "--parents", "-n", "1", completed.result_commit],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(len(parents), 3)
+        self.assertIn("target_moved", event_types)
+        self.assertIn("target_merged", event_types)
+        self.assertIn("merged_fix_revalidated", event_types)
+
+    def test_resolves_merge_conflict_and_records_reason(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(root, repository_path)
+            self._queue(config, baseline, target)
+            worker = LocalWorker(
+                config,
+                CommandRunner(),
+                MovingTargetAgent(repository_path, conflict=True),
+            )
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                events = state.events(completed.id)
+        self.assertEqual(completed.status, "completed")
+        conflict_events = {
+            event.event_type: event for event in events if "conflict" in event.event_type
+        }
+        self.assertIn("merge_conflict_detected", conflict_events)
+        self.assertIn("merge_conflict_decided", conflict_events)
+        self.assertIn("merge_conflict_resolved", conflict_events)
+        self.assertIn(
+            "Preserved the remote update",
+            conflict_events["merge_conflict_resolved"].details_json,
+        )
+
+    def test_direct_jobs_push_separate_commits_from_latest_target(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(
+                root, repository_path, publish_mode="direct"
+            )
+            self._queue(config, baseline, target, fingerprint_character="c")
+            self._queue(config, baseline, target, fingerprint_character="d")
+            worker = LocalDirectPushWorker(config, CommandRunner(), PerJobAgent())
+            self.assertTrue(worker.run_once())
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                jobs = state.jobs()
+                second_events = state.events(jobs[0].id)
+            remaining_worktrees = list((config.state_dir / "worktrees").iterdir())
+            commit_count = int(
+                subprocess.run(
+                    [
+                        "git",
+                        "rev-list",
+                        "--count",
+                        f"{target}..refs/remotes/origin/main",
+                    ],
+                    cwd=repository_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+            )
+        self.assertEqual([job.status for job in jobs], ["completed", "completed"])
+        self.assertEqual(worker.pushed_branches, ["main", "main"])
+        self.assertEqual(commit_count, 2)
+        self.assertEqual(remaining_worktrees, [])
+        created = next(
+            event for event in second_events if event.event_type == "worktree_created"
+        )
+        self.assertNotIn(target, created.details_json)
+
     @staticmethod
-    def _queue(config, baseline: str, target: str) -> None:
+    def _queue(
+        config: object,
+        baseline: str,
+        target: str,
+        *,
+        fingerprint_character: str = "c",
+    ) -> None:
         event = parse_review_event(
             {
                 "version": 1,
@@ -73,7 +266,7 @@ class WorkerTest(unittest.TestCase):
                 "target": target,
                 "findings": [
                     {
-                        "fingerprint": "sha256:" + "c" * 64,
+                        "fingerprint": "sha256:" + fingerprint_character * 64,
                         "severity": "Major",
                         "commit": target,
                         "file": "src/app.py",

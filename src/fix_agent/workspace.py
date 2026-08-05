@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import re
 from .command import CommandRunner
 from .config import RepositoryConfig
 from .errors import FixAgentError
-from .state import Job
+from .state import Job, StateStore
 
 
 _CREDENTIAL_ENVIRONMENT = {
@@ -29,6 +30,14 @@ class DiffSummary:
     deleted_lines: int
 
 
+@dataclass(frozen=True)
+class MergeResult:
+    updated: bool
+    previous_base: str
+    current_target: str
+    conflict_files: tuple[str, ...] = ()
+
+
 class FixWorkspace:
     def __init__(
         self,
@@ -40,11 +49,14 @@ class FixWorkspace:
         self.runner = runner
         self.repository = repository
         self.job = job
+        self.state_dir = state_dir
         worktrees = state_dir / "worktrees"
         worktrees.mkdir(parents=True, exist_ok=True)
         self.root = Path(tempfile.mkdtemp(prefix="fix-", dir=worktrees))
         self.path = self.root / "checkout"
         self._created = False
+        self.base_commit: str | None = None
+        self.cleanup_complete: bool | None = None
 
     @property
     def safe_environment(self) -> dict[str, str]:
@@ -61,11 +73,24 @@ class FixWorkspace:
         return environment
 
     def create(self) -> None:
-        if not self.repository.local_path.is_dir():
+        self._ensure_local_repository()
+        self.base_commit = self.fetch_target_head()
+        ancestry = self.runner.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                self.job.target_commit,
+                self.base_commit,
+            ],
+            cwd=self.repository.local_path,
+            environment=self.safe_environment,
+            check=False,
+        )
+        if ancestry.returncode != 0:
             raise FixAgentError(
-                f"local repository does not exist: {self.repository.local_path}"
+                "reviewed target is not an ancestor of the current target branch"
             )
-        self.fetch_and_require_fresh()
         self.runner.run(
             [
                 "git",
@@ -73,13 +98,51 @@ class FixWorkspace:
                 "add",
                 "--detach",
                 str(self.path),
-                self.job.target_commit,
+                self.base_commit,
             ],
             cwd=self.repository.local_path,
             environment=self.safe_environment,
             timeout_seconds=self.repository.command_timeout_seconds,
         )
         self._created = True
+        self._record_event(
+            "worktree_created",
+            "detached worktree created from the latest target branch",
+            {
+                "path": str(self.path),
+                "remote": self.repository.remote,
+                "target_branch": self.repository.target_branch,
+                "base_commit": self.base_commit,
+            },
+        )
+
+    def _ensure_local_repository(self) -> None:
+        path = self.repository.local_path
+        if path.exists():
+            if not path.is_dir():
+                raise FixAgentError(f"local repository is not a directory: {path}")
+            self.runner.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=path,
+                environment=self.safe_environment,
+            )
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.runner.run(
+            [
+                "git",
+                "clone",
+                "--no-checkout",
+                "--origin",
+                self.repository.remote,
+                "--",
+                f"https://github.com/{self.repository.github}.git",
+                str(path),
+            ],
+            cwd=path.parent,
+            environment=self.network_environment,
+            timeout_seconds=self.repository.command_timeout_seconds,
+        )
 
     def finding_mismatch_reason(self) -> str | None:
         ancestry = self.runner.run(
@@ -139,7 +202,23 @@ class FixWorkspace:
             return "finding line is outside the reviewed diff"
         return None
 
-    def fetch_and_require_fresh(self) -> None:
+    @property
+    def network_environment(self) -> dict[str, str]:
+        environment = self.safe_environment
+        token = os.environ.get(self.repository.github_token_env)
+        if not token:
+            return environment
+        credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        environment.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {credential}",
+            }
+        )
+        return environment
+
+    def fetch_target_head(self) -> str:
         repository = self.repository
         self.runner.run(
             ["git", "check-ref-format", "--branch", repository.branch],
@@ -158,7 +237,7 @@ class FixWorkspace:
                 f"{repository.remote}/{repository.branch}",
             ],
             cwd=repository.local_path,
-            environment=self.safe_environment,
+            environment=self.network_environment,
             timeout_seconds=repository.command_timeout_seconds,
         )
         result = self.runner.run(
@@ -171,11 +250,83 @@ class FixWorkspace:
             cwd=repository.local_path,
             environment=self.safe_environment,
         )
-        head = result.stdout.strip().lower()
-        if head != self.job.target_commit:
+        return result.stdout.strip().lower()
+
+    def merge_latest_target(self, current: str | None = None) -> MergeResult:
+        current = current or self.fetch_target_head()
+        previous_base = self._base_commit()
+        if current == previous_base:
+            return MergeResult(False, previous_base, current)
+        result = self.runner.run(
+            [
+                "git",
+                "-c",
+                "user.name=Code Fix Agent",
+                "-c",
+                "user.email=code-fix-agent@users.noreply.github.com",
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-edit",
+                current,
+            ],
+            cwd=self.path,
+            environment=self.safe_environment,
+            timeout_seconds=self.repository.command_timeout_seconds,
+            check=False,
+        )
+        if result.returncode != 0:
+            conflicts = self.unmerged_files()
+            if conflicts:
+                return MergeResult(True, previous_base, current, conflicts)
+            detail = (result.stderr or result.stdout or "merge failed").strip()
+            raise FixAgentError(f"git merge failed: {detail}")
+        self.base_commit = current
+        return MergeResult(True, previous_base, current)
+
+    def unmerged_files(self) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in self.runner.run(
+                ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
+                cwd=self.path,
+                environment=self.safe_environment,
+            ).stdout.split("\0")
+            if value
+        )
+
+    def complete_conflicted_merge(self, current_target: str) -> None:
+        self.runner.run(
+            ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
+        )
+        conflicts = self.unmerged_files()
+        if conflicts:
             raise FixAgentError(
-                f"target branch moved: reviewed {self.job.target_commit}, current {head}"
+                "merge conflict resolution left unmerged files: "
+                + ", ".join(conflicts)
             )
+        self.runner.run(
+            ["git", "diff", "--cached", "--check"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        self.runner.run(
+            [
+                "git",
+                "-c",
+                "user.name=Code Fix Agent",
+                "-c",
+                "user.email=code-fix-agent@users.noreply.github.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-edit",
+            ],
+            cwd=self.path,
+            environment=self.safe_environment,
+            timeout_seconds=self.repository.command_timeout_seconds,
+        )
+        self.base_commit = current_target
 
     def validate_diff(self) -> DiffSummary:
         untracked = tuple(
@@ -200,7 +351,7 @@ class FixWorkspace:
                 "--name-status",
                 "--no-renames",
                 "-z",
-                self.job.target_commit,
+                self._base_commit(),
                 "--",
             ],
             cwd=self.path,
@@ -232,11 +383,13 @@ class FixWorkspace:
             candidate = self.path / file
             if candidate.exists() and candidate.is_symlink():
                 raise FixAgentError(f"symbolic link changes are not allowed: {file}")
-            if candidate.exists() and not candidate.resolve().is_relative_to(self.path.resolve()):
+            if candidate.exists() and not candidate.resolve().is_relative_to(
+                self.path.resolve()
+            ):
                 raise FixAgentError(f"changed path escapes the worktree: {file}")
         added = deleted = 0
         numstat = self.runner.run(
-            ["git", "diff", "--numstat", self.job.target_commit, "--"],
+            ["git", "diff", "--numstat", self._base_commit(), "--"],
             cwd=self.path,
             environment=self.safe_environment,
         ).stdout
@@ -251,7 +404,7 @@ class FixWorkspace:
                 f"fix changed {added + deleted} lines; limit is {policy.max_changed_lines}"
             )
         self.runner.run(
-            ["git", "diff", "--check", self.job.target_commit, "--"],
+            ["git", "diff", "--check", self._base_commit(), "--"],
             cwd=self.path,
             environment=self.safe_environment,
         )
@@ -259,7 +412,10 @@ class FixWorkspace:
 
     def commit(self) -> tuple[str, str]:
         digest = self.job.fingerprint.removeprefix("sha256:")
-        branch = f"autofix/{self.repository.id}/{digest[:12]}"
+        if self.repository.publish_mode == "pull_request":
+            branch = f"autofix/{self.repository.id}/{digest[:12]}"
+        else:
+            branch = self.repository.target_branch
         self.runner.run(
             ["git", "check-ref-format", "--branch", branch],
             cwd=self.path,
@@ -270,11 +426,12 @@ class FixWorkspace:
             fingerprint_short=digest[:12],
             file=self.job.file,
         )
-        self.runner.run(
-            ["git", "switch", "-c", branch],
-            cwd=self.path,
-            environment=self.safe_environment,
-        )
+        if self.repository.publish_mode == "pull_request":
+            self.runner.run(
+                ["git", "switch", "-c", branch],
+                cwd=self.path,
+                environment=self.safe_environment,
+            )
         self.runner.run(
             ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
         )
@@ -300,28 +457,80 @@ class FixWorkspace:
         ).stdout.strip()
         return branch, commit
 
+    def _base_commit(self) -> str:
+        if self.base_commit is None:
+            raise FixAgentError("worktree base commit is not initialized")
+        return self.base_commit
+
     def stage_for_harness(self) -> None:
         self.runner.run(
             ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
         )
 
+    def require_clean_checkout(self) -> None:
+        status = self.runner.run(
+            ["git", "status", "--porcelain=v1", "-z"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout
+        if status:
+            raise FixAgentError("test harness changed the committed worktree")
+
+    def head_commit(self) -> str:
+        return self.runner.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.strip().lower()
+
     def close(self) -> None:
+        remove_returncode: int | None = None
         if self._created:
-            self.runner.run(
+            result = self.runner.run(
                 ["git", "worktree", "remove", "--force", str(self.path)],
                 cwd=self.repository.local_path,
                 environment=self.safe_environment,
                 check=False,
             )
+            remove_returncode = result.returncode
             self._created = False
         shutil.rmtree(self.root, ignore_errors=True)
+        prune_returncode: int | None = None
         if self.repository.local_path.is_dir():
-            self.runner.run(
+            result = self.runner.run(
                 ["git", "worktree", "prune"],
                 cwd=self.repository.local_path,
                 environment=self.safe_environment,
                 check=False,
             )
+            prune_returncode = result.returncode
+        self.cleanup_complete = (
+            not self.root.exists()
+            and remove_returncode in {None, 0}
+            and prune_returncode in {None, 0}
+        )
+        self._record_event(
+            "worktree_removed"
+            if self.cleanup_complete
+            else "worktree_cleanup_incomplete",
+            "worktree cleanup finished",
+            {
+                "path": str(self.path),
+                "remove_returncode": remove_returncode,
+                "prune_returncode": prune_returncode,
+                "root_exists": self.root.exists(),
+            },
+        )
+
+    def _record_event(
+        self, event_type: str, message: str, details: dict[str, object]
+    ) -> None:
+        try:
+            with StateStore(self.state_dir) as state:
+                state.record_event(self.job.id, event_type, message, details)
+        except Exception as exc:
+            if "job does not exist" not in str(exc):
+                print(f"job {self.job.id} event log failed: {exc}")
 
     def __enter__(self) -> FixWorkspace:
         try:

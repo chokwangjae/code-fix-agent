@@ -23,12 +23,19 @@ class StateTest(unittest.TestCase):
                 state.record_precheck(claimed.id, True, "A caller drops exit 1.")
                 state.record_postcheck(claimed.id, True, "The failure now propagates.")
                 jobs = state.jobs()
+                events = state.events()
+                after_first = state.events(after_id=events[0].id)
         self.assertEqual((first.created, first.duplicate), (1, 0))
         self.assertEqual((second.created, second.duplicate), (0, 1))
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].status, "ready")
         self.assertEqual(jobs[0].precheck_reason, "A caller drops exit 1.")
         self.assertEqual(jobs[0].postcheck_reason, "The failure now propagates.")
+        self.assertEqual(
+            [item.id for item in after_first], [item.id for item in events[1:]]
+        )
+        self.assertIn("duplicate_received", [item.event_type for item in events])
+        self.assertEqual(sorted(item.id for item in events), [item.id for item in events])
 
     @staticmethod
     def _config() -> str:

@@ -32,6 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
     jobs_parser.add_argument("--limit", type=int, default=20)
     jobs_parser.add_argument("--json", action="store_true")
 
+    events_parser = subparsers.add_parser(
+        "events", help="list append-only job events from a global cursor"
+    )
+    events_parser.add_argument("--config", required=True, type=Path)
+    events_parser.add_argument("--job-id", type=int)
+    events_parser.add_argument("--after-id", type=int, default=0)
+    events_parser.add_argument("--limit", type=int, default=500)
+    events_parser.add_argument("--json", action="store_true")
+
     run_parser = subparsers.add_parser("run-once", help="process one queued fix job")
     run_parser.add_argument("--config", required=True, type=Path)
     return parser
@@ -57,6 +66,27 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run-once":
             processed = FixWorker(config).run_once()
             print("processed one job" if processed else "no queued jobs")
+            return 0
+        if args.command == "events":
+            if args.job_id is not None and args.job_id < 1:
+                raise FixAgentError("--job-id must be a positive integer")
+            if args.after_id < 0 or args.limit < 1:
+                raise FixAgentError("--after-id and --limit are invalid")
+            with StateStore(config.state_dir) as state:
+                events = state.events(args.job_id, args.after_id, args.limit)
+            if args.json:
+                payload = []
+                for event in events:
+                    value = asdict(event)
+                    value["details"] = json.loads(value.pop("details_json"))
+                    payload.append(value)
+                print(json.dumps(payload, ensure_ascii=False))
+                return 0
+            for event in events:
+                print(
+                    f"{event.id}\t{event.created_at}\t{event.status}\t"
+                    f"{event.event_type}\t{event.message}"
+                )
             return 0
         if args.limit < 1:
             raise FixAgentError("--limit must be a positive integer")

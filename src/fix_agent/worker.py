@@ -49,7 +49,35 @@ class FixWorker:
 
     def _process(self, job: Job) -> None:
         repository = self.config.repository_by_id(job.repository_id)
+        self._event(
+            job.id,
+            "processing_started",
+            "worker started processing the finding",
+            {
+                "remote": repository.remote,
+                "target_branch": repository.target_branch,
+                "publish_mode": repository.publish_mode,
+            },
+        )
         if job.fix_branch and job.result_commit:
+            if repository.publish_mode == "direct":
+                with StateStore(self.config.state_dir) as state:
+                    cleanup_events = [
+                        event
+                        for event in state.events(job.id)
+                        if event.event_type
+                        in {"worktree_removed", "worktree_cleanup_incomplete"}
+                    ]
+                    if (
+                        not cleanup_events
+                        or cleanup_events[-1].event_type != "worktree_removed"
+                    ):
+                        raise FixAgentError(
+                            "direct push succeeded but worktree cleanup requires "
+                            "manual reconciliation"
+                        )
+                    state.mark_completed(job.id, None)
+                return
             pr_url = self._publish_pull_request(repository, job, job.fix_branch)
             with StateStore(self.config.state_dir) as state:
                 state.mark_completed(job.id, pr_url)
@@ -65,8 +93,14 @@ class FixWorker:
                     state.record_precheck(job.id, False, mismatch)
                 print(f"job {job.id} rejected: {mismatch}")
                 return
+            self._event(
+                job.id,
+                "finding_git_validated",
+                "finding commit, file, and reviewed line matched the review diff",
+                {"reviewed_target": job.target_commit},
+            )
             decision = self.agent.validate_finding(
-                repository, job, workspace.path, environment
+                repository, job, workspace.path, environment, workspace.base_commit
             )
             with StateStore(self.config.state_dir) as state:
                 state.record_precheck(job.id, decision.valid, decision.reason)
@@ -74,9 +108,29 @@ class FixWorker:
                 print(f"job {job.id} rejected: {decision.reason}")
                 return
 
-            self.agent.apply_fix(repository, job, workspace.path, environment)
+            self.agent.apply_fix(
+                repository, job, workspace.path, environment, workspace.base_commit
+            )
+            self._event(
+                job.id,
+                "fix_applied",
+                "Codex finished the initial workspace edit",
+                {"workspace_base": workspace.base_commit},
+            )
             summary = workspace.validate_diff()
+            self._event(
+                job.id,
+                "diff_validated",
+                "initial diff passed repository policy",
+                {
+                    "files": list(summary.files),
+                    "added_lines": summary.added_lines,
+                    "deleted_lines": summary.deleted_lines,
+                },
+            )
             workspace.stage_for_harness()
+            with StateStore(self.config.state_dir) as state:
+                state.mark_testing(job.id)
             tests = self._run_tests(repository, workspace.path, environment)
             with StateStore(self.config.state_dir) as state:
                 state.record_tests(job.id, tests)
@@ -84,17 +138,175 @@ class FixWorker:
             if failed:
                 raise FixAgentError("configured test command failed")
             postcheck = self.agent.validate_fix(
-                repository, job, workspace.path, environment
+                repository, job, workspace.path, environment, workspace.base_commit
             )
             with StateStore(self.config.state_dir) as state:
                 state.record_postcheck(job.id, postcheck.valid, postcheck.reason)
             if not postcheck.valid:
                 print(f"job {job.id} fix rejected: {postcheck.reason}")
                 return
-            workspace.fetch_and_require_fresh()
             workspace.validate_diff()
             branch, commit = workspace.commit()
-            self._push(repository, workspace.path, environment, branch)
+            self._event(
+                job.id,
+                "fix_committed",
+                "validated fix was committed in the worktree",
+                {"branch": branch, "commit": commit},
+            )
+            remote_merges = 0
+            while True:
+                current = workspace.fetch_target_head()
+                if current != workspace.base_commit:
+                    if remote_merges >= repository.max_remote_merge_attempts:
+                        raise FixAgentError(
+                            "target branch kept moving during fix; merge limit reached"
+                        )
+                    self._event(
+                        job.id,
+                        "target_moved",
+                        "target branch moved; merging the latest target",
+                        {
+                            "previous_base": workspace.base_commit,
+                            "current_target": current,
+                            "merge_attempt": remote_merges + 1,
+                        },
+                    )
+                    merge = workspace.merge_latest_target(current)
+                    remote_merges += 1
+                    if merge.conflict_files:
+                        self._event(
+                            job.id,
+                            "merge_conflict_detected",
+                            "target merge produced conflicts",
+                            {
+                                "previous_base": merge.previous_base,
+                                "current_target": merge.current_target,
+                                "files": list(merge.conflict_files),
+                            },
+                        )
+                        resolution = self.agent.resolve_merge_conflicts(
+                            repository,
+                            job,
+                            workspace.path,
+                            environment,
+                            merge.previous_base,
+                            merge.current_target,
+                            merge.conflict_files,
+                        )
+                        self._event(
+                            job.id,
+                            "merge_conflict_decided",
+                            "Codex returned a merge conflict decision",
+                            {
+                                "resolved": resolution.valid,
+                                "reason": resolution.reason,
+                                "files": list(merge.conflict_files),
+                            },
+                        )
+                        if not resolution.valid:
+                            raise FixAgentError(
+                                "Codex could not safely resolve merge conflicts: "
+                                + resolution.reason
+                            )
+                        workspace.complete_conflicted_merge(merge.current_target)
+                        self._event(
+                            job.id,
+                            "merge_conflict_resolved",
+                            "merge conflicts were resolved and committed",
+                            {
+                                "current_target": merge.current_target,
+                                "reason": resolution.reason,
+                                "commit": workspace.head_commit(),
+                            },
+                        )
+                    else:
+                        self._event(
+                            job.id,
+                            "target_merged",
+                            "latest target branch was merged without conflicts",
+                            {
+                                "previous_base": merge.previous_base,
+                                "current_target": merge.current_target,
+                                "commit": workspace.head_commit(),
+                            },
+                        )
+                    summary = workspace.validate_diff()
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_testing(job.id)
+                    tests = self._run_tests(repository, workspace.path, environment)
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_tests(job.id, tests)
+                    failed = [test for test in tests if test["returncode"] != 0]
+                    if failed:
+                        raise FixAgentError(
+                            "configured test command failed after target merge"
+                        )
+                    workspace.require_clean_checkout()
+                    postcheck = self.agent.validate_fix(
+                        repository,
+                        job,
+                        workspace.path,
+                        environment,
+                        workspace.base_commit,
+                    )
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_postcheck(
+                            job.id, postcheck.valid, postcheck.reason
+                        )
+                    if not postcheck.valid:
+                        print(
+                            f"job {job.id} merged fix rejected: {postcheck.reason}"
+                        )
+                        return
+                    commit = workspace.head_commit()
+                    self._event(
+                        job.id,
+                        "merged_fix_revalidated",
+                        "merged fix passed policy, harness, and result validation",
+                        {
+                            "target_commit": workspace.base_commit,
+                            "result_commit": commit,
+                            "merge_attempt": remote_merges,
+                        },
+                    )
+                    continue
+                try:
+                    self._event(
+                        job.id,
+                        "push_started",
+                        "pushing the worktree result to the configured remote",
+                        {"remote": repository.remote, "branch": branch},
+                    )
+                    self._push(repository, workspace.path, environment, branch)
+                except FixAgentError as push_error:
+                    current = workspace.fetch_target_head()
+                    if (
+                        repository.publish_mode == "direct"
+                        and current == workspace.head_commit()
+                    ):
+                        commit = current
+                        break
+                    if current != workspace.base_commit:
+                        self._event(
+                            job.id,
+                            "push_retry_after_target_move",
+                            "push raced with a target update; merge will be retried",
+                            {
+                                "previous_base": workspace.base_commit,
+                                "current_target": current,
+                                "error": str(push_error),
+                            },
+                        )
+                        continue
+                    raise push_error
+                commit = workspace.head_commit()
+                break
+            self._event(
+                job.id,
+                "push_completed",
+                "worktree result was pushed to the configured remote",
+                {"remote": repository.remote, "branch": branch, "commit": commit},
+            )
             with StateStore(self.config.state_dir) as state:
                 state.mark_pushed(job.id, branch, commit)
             job = Job(
@@ -113,10 +325,30 @@ class FixWorker:
                 f"job {job.id} changed {len(summary.files)} file(s), "
                 f"{summary.added_lines + summary.deleted_lines} line(s)"
             )
+        if not workspace.cleanup_complete:
+            raise FixAgentError("worktree cleanup did not complete after push")
+        if repository.publish_mode == "direct":
+            with StateStore(self.config.state_dir) as state:
+                state.mark_completed(job.id, None)
+            print(
+                f"job {job.id} completed: "
+                f"{repository.remote}/{repository.target_branch}"
+            )
+            return
         pr_url = self._publish_pull_request(repository, job, branch)
         with StateStore(self.config.state_dir) as state:
             state.mark_completed(job.id, pr_url)
         print(f"job {job.id} completed: {pr_url}")
+
+    def _event(
+        self,
+        job_id: int,
+        event_type: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        with StateStore(self.config.state_dir) as state:
+            state.record_event(job_id, event_type, message, details)
 
     def _run_tests(
         self,
@@ -177,14 +409,14 @@ class FixWorker:
                 "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {credential}",
             }
         )
+        command = ["git", "push"]
+        if repository.publish_mode == "pull_request":
+            command.append("--set-upstream")
+        command.extend(
+            [repository.remote, f"HEAD:refs/heads/{branch}"]
+        )
         self.runner.run(
-            [
-                "git",
-                "push",
-                "--set-upstream",
-                repository.remote,
-                f"HEAD:refs/heads/{branch}",
-            ],
+            command,
             cwd=workspace,
             environment=push_environment,
             timeout_seconds=repository.command_timeout_seconds,
