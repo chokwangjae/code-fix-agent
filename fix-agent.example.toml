@@ -1,5 +1,6 @@
 version = 1
 state_dir = ".fix-agent"
+# codex_executable = "/absolute/path/to/codex"
 
 [server]
 host = "127.0.0.1"
@@ -16,6 +17,7 @@ remote = "origin"
 github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []
 additional_instructions = ""
+commit_message_template = "fix: resolve review finding {fingerprint_short}"
 
 [repositories.execution]
 command_timeout_seconds = 1800
@@ -26,6 +28,7 @@ allowed_severities = ["Major", "Minor"]
 allowed_paths = ["**"]
 denied_paths = [
   ".github/workflows/**",
+  ".env*",
   "**/*.p12",
   "**/*.mobileprovision",
   "**/.env*",
@@ -36,3 +39,4 @@ max_changed_files = 10
 max_changed_lines = 500
 allow_new_files = false
 allow_deletions = false
+require_finding_file_changed = true

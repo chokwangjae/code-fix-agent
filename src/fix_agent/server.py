@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
 import os
+import threading
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,6 +13,7 @@ from .config import AppConfig
 from .contract import parse_review_event
 from .errors import FixAgentError
 from .state import StateStore
+from .worker import FixWorker
 
 
 class IntakeApplication:
@@ -38,6 +40,11 @@ def serve(config: AppConfig) -> None:
             f"required environment variable is not set: {config.server.token_env}"
         )
     application = IntakeApplication(config)
+    worker = FixWorker(config)
+    worker_thread = threading.Thread(
+        target=worker.run_forever, name="fix-agent-worker", daemon=True
+    )
+    worker_thread.start()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "code-fix-agent/0.1"
@@ -94,4 +101,6 @@ def serve(config: AppConfig) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        worker.stop()
         server.server_close()
+        worker_thread.join(timeout=5)

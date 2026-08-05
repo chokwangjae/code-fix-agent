@@ -35,6 +35,7 @@ class RepositoryPolicy:
     max_changed_lines: int
     allow_new_files: bool
     allow_deletions: bool
+    require_finding_file_changed: bool
 
     def skip_reason(self, severity: str, file: str, fingerprint: str) -> str | None:
         if severity not in self.allowed_severities:
@@ -69,6 +70,7 @@ class RepositoryConfig:
     github_token_env: str
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
+    commit_message_template: str
     command_timeout_seconds: int
     max_attempts: int
     policy: RepositoryPolicy
@@ -77,6 +79,7 @@ class RepositoryConfig:
 @dataclass(frozen=True)
 class AppConfig:
     state_dir: Path
+    codex_executable: str | None
     server: ServerConfig
     repositories: tuple[RepositoryConfig, ...]
 
@@ -105,6 +108,11 @@ def load_config(path: Path) -> AppConfig:
     base = path.resolve().parent
     state_dir = _resolve_path(base, _required_string(raw, "state_dir"))
     server = _server(raw.get("server"))
+    codex_executable = raw.get("codex_executable")
+    if codex_executable is not None and (
+        not isinstance(codex_executable, str) or not codex_executable
+    ):
+        raise FixAgentError("codex_executable must be a non-empty string")
     raw_repositories = raw.get("repositories")
     if not isinstance(raw_repositories, list) or not raw_repositories:
         raise FixAgentError("repositories must be a non-empty array")
@@ -119,7 +127,7 @@ def load_config(path: Path) -> AppConfig:
         raise FixAgentError("repository ids must be unique")
     if len(coordinates) != len(set(coordinates)):
         raise FixAgentError("repository and branch pairs must be unique")
-    return AppConfig(state_dir, server, repositories)
+    return AppConfig(state_dir, codex_executable, server, repositories)
 
 
 def _server(raw: Any) -> ServerConfig:
@@ -151,6 +159,21 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
     additional_instructions = raw.get("additional_instructions", "")
     if not isinstance(additional_instructions, str):
         raise FixAgentError(f"{context}.additional_instructions must be a string")
+    commit_message_template = raw.get(
+        "commit_message_template", "fix: resolve review finding {fingerprint}"
+    )
+    if not isinstance(commit_message_template, str) or not commit_message_template.strip():
+        raise FixAgentError(f"{context}.commit_message_template must be a string")
+    try:
+        commit_message_template.format(
+            fingerprint="sha256:" + "0" * 64,
+            fingerprint_short="0" * 12,
+            file="path/to/file",
+        )
+    except (KeyError, ValueError) as exc:
+        raise FixAgentError(
+            f"{context}.commit_message_template contains an invalid placeholder"
+        ) from exc
     remote = raw.get("remote", "origin")
     if not isinstance(remote, str) or not remote:
         raise FixAgentError(f"{context}.remote must be a non-empty string")
@@ -166,6 +189,7 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         github_token_env=_environment_name(raw, "github_token_env", context),
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
+        commit_message_template=commit_message_template.strip(),
         command_timeout_seconds=_positive_integer(
             execution.get("command_timeout_seconds", 1800),
             f"{context}.execution.command_timeout_seconds",
@@ -193,6 +217,7 @@ def _policy(raw: Any, context: str) -> RepositoryPolicy:
             "denied_paths",
             [
                 ".github/workflows/**",
+                ".env*",
                 "**/*.p12",
                 "**/*.mobileprovision",
                 "**/.env*",
@@ -213,7 +238,12 @@ def _policy(raw: Any, context: str) -> RepositoryPolicy:
         raise FixAgentError(f"{context}.skipped_fingerprints contains an invalid value")
     allow_new_files = raw.get("allow_new_files", False)
     allow_deletions = raw.get("allow_deletions", False)
-    if not isinstance(allow_new_files, bool) or not isinstance(allow_deletions, bool):
+    require_finding_file_changed = raw.get("require_finding_file_changed", True)
+    if (
+        not isinstance(allow_new_files, bool)
+        or not isinstance(allow_deletions, bool)
+        or not isinstance(require_finding_file_changed, bool)
+    ):
         raise FixAgentError(f"{context} file flags must be booleans")
     return RepositoryPolicy(
         allowed_severities=severities,
@@ -229,6 +259,7 @@ def _policy(raw: Any, context: str) -> RepositoryPolicy:
         ),
         allow_new_files=allow_new_files,
         allow_deletions=allow_deletions,
+        require_finding_file_changed=require_finding_file_changed,
     )
 
 

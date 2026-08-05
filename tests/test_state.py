@@ -19,11 +19,16 @@ class StateTest(unittest.TestCase):
             with StateStore(config.state_dir) as state:
                 first = state.accept(config.repositories[0], parsed)
                 second = state.accept(config.repositories[0], parsed)
+                claimed = state.claim_next(config.repositories)
+                state.record_precheck(claimed.id, True, "A caller drops exit 1.")
+                state.record_postcheck(claimed.id, True, "The failure now propagates.")
                 jobs = state.jobs()
         self.assertEqual((first.created, first.duplicate), (1, 0))
         self.assertEqual((second.created, second.duplicate), (0, 1))
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].status, "queued")
+        self.assertEqual(jobs[0].status, "ready")
+        self.assertEqual(jobs[0].precheck_reason, "A caller drops exit 1.")
+        self.assertEqual(jobs[0].postcheck_reason, "The failure now propagates.")
 
     @staticmethod
     def _config() -> str:

@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
 
 from .config import RepositoryConfig
-from .contract import Finding, ReviewEvent
+from .contract import ReviewEvent
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,11 @@ class Job:
     status: str
     attempts: int
     last_error: str | None
+    precheck_status: str | None
+    precheck_reason: str | None
+    postcheck_status: str | None
+    postcheck_reason: str | None
+    tests_json: str
     fix_branch: str | None
     result_commit: str | None
     pr_url: str | None
@@ -71,6 +77,11 @@ class StateStore:
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                precheck_status TEXT,
+                precheck_reason TEXT,
+                postcheck_status TEXT,
+                postcheck_reason TEXT,
+                tests_json TEXT NOT NULL DEFAULT '[]',
                 fix_branch TEXT,
                 result_commit TEXT,
                 pr_url TEXT,
@@ -80,6 +91,20 @@ class StateStore:
             )
             """
         )
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")
+        }
+        for name, declaration in (
+            ("precheck_status", "TEXT"),
+            ("precheck_reason", "TEXT"),
+            ("postcheck_status", "TEXT"),
+            ("postcheck_reason", "TEXT"),
+            ("tests_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ):
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE jobs ADD COLUMN {name} {declaration}"
+                )
         self.connection.commit()
 
     def accept(self, repository: RepositoryConfig, event: ReviewEvent) -> IntakeResult:
@@ -144,6 +169,97 @@ class StateStore:
         ).fetchall()
         return tuple(Job(**dict(row)) for row in rows)
 
+    def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
+        limits = {repository.id: repository.max_attempts for repository in repositories}
+        with self.connection:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE status IN ('queued', 'failed')
+                ORDER BY id
+                """
+            ).fetchall()
+            row = next(
+                (
+                    value
+                    for value in rows
+                    if value["repository_id"] in limits
+                    and value["attempts"] < limits[value["repository_id"]]
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            cursor = self.connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'validating', attempts = attempts + 1,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ? AND status IN ('queued', 'failed')
+                """,
+                (_now(), row["id"]),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = self.connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (row["id"],)
+            ).fetchone()
+        return Job(**dict(claimed)) if claimed is not None else None
+
+    def record_precheck(self, job_id: int, valid: bool, reason: str) -> None:
+        self._update(
+            job_id,
+            "fixing" if valid else "rejected",
+            precheck_status="valid" if valid else "invalid",
+            precheck_reason=reason,
+        )
+
+    def record_tests(self, job_id: int, results: list[dict[str, object]]) -> None:
+        self._update(job_id, "testing", tests_json=json.dumps(results, ensure_ascii=False))
+
+    def record_postcheck(self, job_id: int, valid: bool, reason: str) -> None:
+        self._update(
+            job_id,
+            "ready" if valid else "rejected",
+            postcheck_status="resolved" if valid else "invalid",
+            postcheck_reason=reason,
+        )
+
+    def mark_pushed(self, job_id: int, branch: str, commit: str) -> None:
+        self._update(job_id, "pushed", fix_branch=branch, result_commit=commit)
+
+    def mark_completed(self, job_id: int, pr_url: str) -> None:
+        self._update(job_id, "completed", pr_url=pr_url)
+
+    def mark_failed(self, job_id: int, error: str) -> None:
+        self._update(job_id, "failed", last_error=error[:20_000])
+
+    def _update(self, job_id: int, status: str, **values: object) -> None:
+        assignments = ["status = ?", "updated_at = ?"]
+        parameters: list[object] = [status, _now()]
+        for key, value in values.items():
+            if key not in {
+                "last_error",
+                "precheck_status",
+                "precheck_reason",
+                "postcheck_status",
+                "postcheck_reason",
+                "tests_json",
+                "fix_branch",
+                "result_commit",
+                "pr_url",
+            }:
+                raise ValueError(f"unsupported job field: {key}")
+            assignments.append(f"{key} = ?")
+            parameters.append(value)
+        parameters.append(job_id)
+        with self.connection:
+            cursor = self.connection.execute(
+                f"UPDATE jobs SET {', '.join(assignments)} WHERE id = ?", parameters
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError(f"job does not exist: {job_id}")
+
     def close(self) -> None:
         self.connection.close()
 
@@ -152,3 +268,7 @@ class StateStore:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
