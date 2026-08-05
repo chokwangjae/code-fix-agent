@@ -39,6 +39,8 @@ curl http://127.0.0.1:7081/health
 
 Discord 알림은 `fix-agent.toml`의 저장소별 `[repositories.discord]`에서 켠다. 현재 기본 설정은 실제 발송을 막기 위해 `enabled = false`다. `true`로 바꾼 뒤 `webhook_url_env`에 적힌 환경 변수에 웹훅 URL을 넣으면 `serve`와 `run-once`가 작업 이벤트를 전송한다. 수동 전송·재시도는 다음 명령으로 확인한다.
 
+`fix-agent.toml`은 프로세스 시작 시 한 번만 읽는다. `enabled`, `webhook_url`, `webhook_url_env`, `timeout_seconds` 중 하나라도 바꾸면 직접 실행 중인 `serve`를 재시작하거나 LaunchAgent를 다시 설치해야 한다.
+
 ```bash
 .venv/bin/fix-agent notify-once --config fix-agent.toml
 .venv/bin/fix-agent notify-once --config fix-agent.toml --force
