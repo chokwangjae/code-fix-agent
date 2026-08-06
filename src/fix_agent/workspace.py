@@ -4,9 +4,10 @@ import base64
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
-import re
+import threading
 
 from .command import CommandRunner
 from .config import RepositoryConfig
@@ -22,6 +23,14 @@ _CREDENTIAL_ENVIRONMENT = {
     "SSH_ASKPASS",
 }
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_REPOSITORY_LOCKS: dict[Path, threading.RLock] = {}
+_REPOSITORY_LOCKS_GUARD = threading.Lock()
+
+
+def _repository_lock(path: Path) -> threading.RLock:
+    key = path.resolve()
+    with _REPOSITORY_LOCKS_GUARD:
+        return _REPOSITORY_LOCKS.setdefault(key, threading.RLock())
 
 
 @dataclass(frozen=True)
@@ -81,37 +90,38 @@ class FixWorkspace:
         return environment
 
     def create(self) -> None:
-        self._ensure_local_repository()
-        self.base_commit = self.fetch_target_head()
-        ancestry = self.runner.run(
-            [
-                "git",
-                "merge-base",
-                "--is-ancestor",
-                self.job.target_commit,
-                self.base_commit,
-            ],
-            cwd=self.repository.local_path,
-            environment=self.safe_environment,
-            check=False,
-        )
-        if ancestry.returncode != 0:
-            raise FixAgentError(
-                "reviewed target is not an ancestor of the current target branch"
+        with _repository_lock(self.repository.local_path):
+            self._ensure_local_repository()
+            self.base_commit = self.fetch_target_head()
+            ancestry = self.runner.run(
+                [
+                    "git",
+                    "merge-base",
+                    "--is-ancestor",
+                    self.job.target_commit,
+                    self.base_commit,
+                ],
+                cwd=self.repository.local_path,
+                environment=self.safe_environment,
+                check=False,
             )
-        self.runner.run(
-            [
-                "git",
-                "worktree",
-                "add",
-                "--detach",
-                str(self.path),
-                self.base_commit,
-            ],
-            cwd=self.repository.local_path,
-            environment=self.safe_environment,
-            timeout_seconds=self.repository.command_timeout_seconds,
-        )
+            if ancestry.returncode != 0:
+                raise FixAgentError(
+                    "reviewed target is not an ancestor of the current target branch"
+                )
+            self.runner.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(self.path),
+                    self.base_commit,
+                ],
+                cwd=self.repository.local_path,
+                environment=self.safe_environment,
+                timeout_seconds=self.repository.command_timeout_seconds,
+            )
         self._created = True
         self._record_event(
             "worktree_created",
@@ -236,36 +246,37 @@ class FixWorkspace:
 
     def fetch_target_head(self) -> str:
         repository = self.repository
-        self.runner.run(
-            ["git", "check-ref-format", "--branch", repository.branch],
-            cwd=repository.local_path,
-            environment=self.safe_environment,
-        )
-        self.runner.run(
-            [
-                "git",
-                "fetch",
-                "--prune",
-                "--no-tags",
-                "--",
-                repository.remote,
-                f"+refs/heads/{repository.branch}:refs/remotes/"
-                f"{repository.remote}/{repository.branch}",
-            ],
-            cwd=repository.local_path,
-            environment=self.network_environment,
-            timeout_seconds=repository.command_timeout_seconds,
-        )
-        result = self.runner.run(
-            [
-                "git",
-                "rev-parse",
-                "--verify",
-                f"refs/remotes/{repository.remote}/{repository.branch}^{{commit}}",
-            ],
-            cwd=repository.local_path,
-            environment=self.safe_environment,
-        )
+        with _repository_lock(repository.local_path):
+            self.runner.run(
+                ["git", "check-ref-format", "--branch", repository.branch],
+                cwd=repository.local_path,
+                environment=self.safe_environment,
+            )
+            self.runner.run(
+                [
+                    "git",
+                    "fetch",
+                    "--prune",
+                    "--no-tags",
+                    "--",
+                    repository.remote,
+                    f"+refs/heads/{repository.branch}:refs/remotes/"
+                    f"{repository.remote}/{repository.branch}",
+                ],
+                cwd=repository.local_path,
+                environment=self.network_environment,
+                timeout_seconds=repository.command_timeout_seconds,
+            )
+            result = self.runner.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    f"refs/remotes/{repository.remote}/{repository.branch}^{{commit}}",
+                ],
+                cwd=repository.local_path,
+                environment=self.safe_environment,
+            )
         return result.stdout.strip().lower()
 
     def merge_latest_target(self, current: str | None = None) -> MergeResult:
@@ -501,25 +512,26 @@ class FixWorkspace:
 
     def close(self) -> None:
         remove_returncode: int | None = None
-        if self._created:
-            result = self.runner.run(
-                ["git", "worktree", "remove", "--force", str(self.path)],
-                cwd=self.repository.local_path,
-                environment=self.safe_environment,
-                check=False,
-            )
-            remove_returncode = result.returncode
-            self._created = False
+        with _repository_lock(self.repository.local_path):
+            if self._created:
+                result = self.runner.run(
+                    ["git", "worktree", "remove", "--force", str(self.path)],
+                    cwd=self.repository.local_path,
+                    environment=self.safe_environment,
+                    check=False,
+                )
+                remove_returncode = result.returncode
+                self._created = False
+            prune_returncode: int | None = None
+            if self.repository.local_path.is_dir():
+                result = self.runner.run(
+                    ["git", "worktree", "prune"],
+                    cwd=self.repository.local_path,
+                    environment=self.safe_environment,
+                    check=False,
+                )
+                prune_returncode = result.returncode
         shutil.rmtree(self.root, ignore_errors=True)
-        prune_returncode: int | None = None
-        if self.repository.local_path.is_dir():
-            result = self.runner.run(
-                ["git", "worktree", "prune"],
-                cwd=self.repository.local_path,
-                environment=self.safe_environment,
-                check=False,
-            )
-            prune_returncode = result.returncode
         self.cleanup_complete = (
             not self.root.exists()
             and remove_returncode in {None, 0}
@@ -575,22 +587,23 @@ def reconcile_recorded_worktree(
         or not path.parent.name.startswith("fix-")
     ):
         raise FixAgentError("recorded worktree path is outside the managed root")
-    result = runner.run(
-        ["git", "worktree", "remove", "--force", str(path)],
-        cwd=repository.local_path,
-        check=False,
-    )
-    shutil.rmtree(path.parent, ignore_errors=True)
-    prune = runner.run(
-        ["git", "worktree", "prune"],
-        cwd=repository.local_path,
-        check=False,
-    )
-    listed = runner.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=repository.local_path,
-        check=False,
-    )
+    with _repository_lock(repository.local_path):
+        result = runner.run(
+            ["git", "worktree", "remove", "--force", str(path)],
+            cwd=repository.local_path,
+            check=False,
+        )
+        shutil.rmtree(path.parent, ignore_errors=True)
+        prune = runner.run(
+            ["git", "worktree", "prune"],
+            cwd=repository.local_path,
+            check=False,
+        )
+        listed = runner.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repository.local_path,
+            check=False,
+        )
     registered = any(
         line == f"worktree {path}" for line in listed.stdout.splitlines()
     )

@@ -11,7 +11,9 @@ from urllib.parse import urlsplit
 from .config import AppConfig
 from .contract import parse_review_event
 from .credentials import resolve_credential
+from .crontrol import CrontrolReporter
 from .errors import FixAgentError
+from .notify import DiscordNotifier
 from .state import StateStore
 from .worker import FixWorker
 
@@ -40,11 +42,6 @@ def serve(config: AppConfig) -> None:
         config.server.token, config.server.token_env, "server token"
     )
     application = IntakeApplication(config)
-    worker = FixWorker(config)
-    worker_thread = threading.Thread(
-        target=worker.run_forever, name="fix-agent-worker", daemon=True
-    )
-    worker_thread.start()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "code-fix-agent/0.1"
@@ -95,12 +92,33 @@ def serve(config: AppConfig) -> None:
             self.wfile.write(body)
 
     server = ThreadingHTTPServer((config.server.host, config.server.port), Handler)
-    print(f"fix agent listening on {config.server.host}:{config.server.port}")
+    notifier = DiscordNotifier(config)
+    crontrol = CrontrolReporter(config)
+    workers = [
+        FixWorker(config, notifier=notifier, crontrol=crontrol)
+        for _ in range(config.server.max_concurrent_jobs)
+    ]
+    worker_threads = [
+        threading.Thread(
+            target=worker.run_forever,
+            name=f"fix-agent-worker-{index}",
+            daemon=True,
+        )
+        for index, worker in enumerate(workers, start=1)
+    ]
+    for worker_thread in worker_threads:
+        worker_thread.start()
+    print(
+        f"fix agent listening on {config.server.host}:{config.server.port} "
+        f"with {len(workers)} worker(s)"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        worker.stop()
+        for worker in workers:
+            worker.stop()
         server.server_close()
-        worker_thread.join(timeout=5)
+        for worker_thread in worker_threads:
+            worker_thread.join(timeout=5)

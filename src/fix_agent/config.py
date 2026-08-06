@@ -26,6 +26,7 @@ class ServerConfig:
     token: str | None = field(repr=False)
     token_env: str | None
     max_body_bytes: int = 1_048_576
+    max_concurrent_jobs: int = 1
 
 
 @dataclass(frozen=True)
@@ -180,8 +181,15 @@ def _server(raw: Any) -> ServerConfig:
     max_body_bytes = _positive_integer(
         raw.get("max_body_bytes", 1_048_576), "server.max_body_bytes"
     )
+    max_concurrent_jobs = _positive_integer(
+        raw.get("max_concurrent_jobs", 1),
+        "server.max_concurrent_jobs",
+        maximum=32,
+    )
     token, token_env = _credential_source(raw, "token", "token_env", "server")
-    return ServerConfig(host, port, token, token_env, max_body_bytes)
+    return ServerConfig(
+        host, port, token, token_env, max_body_bytes, max_concurrent_jobs
+    )
 
 
 def _crontrol(raw: Any) -> CrontrolConfig:

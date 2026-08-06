@@ -160,6 +160,28 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.crontrol.timeout_seconds, 7)
         self.assertNotIn("crontrol-secret", repr(config))
 
+    def test_loads_concurrent_worker_limit(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                '[server]\ntoken_env = "FIX_TOKEN"',
+                '[server]\ntoken_env = "FIX_TOKEN"\nmax_concurrent_jobs = 3',
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+        self.assertEqual(config.server.max_concurrent_jobs, 3)
+
+    def test_rejects_excessive_concurrent_worker_limit(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                '[server]\ntoken_env = "FIX_TOKEN"',
+                '[server]\ntoken_env = "FIX_TOKEN"\nmax_concurrent_jobs = 33',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "max_concurrent_jobs"):
+                load_config(path)
+
     def test_rejects_two_github_token_sources(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "fix.toml"

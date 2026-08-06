@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Callable, ContextManager, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -33,25 +34,30 @@ class CrontrolReporter:
         self.opener = opener
         self._last_payload: str | None = None
         self.last_error: str | None = None
+        self._lock = threading.RLock()
+        self._stages: dict[int, str] = {}
 
     def sync(self, current_job_id: int | None, stage: str | None = None) -> bool:
         if not self.settings.enabled:
             return False
-        try:
-            payload = self._payload(current_job_id, stage)
-            serialized = json.dumps(
-                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            if serialized == self._last_payload:
+        with self._lock:
+            if current_job_id is not None and stage is not None:
+                self._stages[current_job_id] = stage
+            try:
+                payload = self._payload(current_job_id, stage)
+                serialized = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if serialized == self._last_payload:
+                    return False
+                self._send(payload)
+                self._last_payload = serialized
+                self.last_error = None
+                return True
+            except (FixAgentError, OSError, HTTPError, URLError, ValueError) as exc:
+                self.last_error = _safe_error(exc)
+                print(f"Crontrol status sync failed: {self.last_error}")
                 return False
-            self._send(payload)
-            self._last_payload = serialized
-            self.last_error = None
-            return True
-        except (FixAgentError, OSError, HTTPError, URLError, ValueError) as exc:
-            self.last_error = _safe_error(exc)
-            print(f"Crontrol status sync failed: {self.last_error}")
-            return False
 
     def _payload(
         self, current_job_id: int | None, stage: str | None
@@ -61,6 +67,15 @@ class CrontrolReporter:
         current = next((job for job in jobs if job.id == current_job_id), None)
         if current_job_id is not None and current is None:
             raise FixAgentError(f"job does not exist: {current_job_id}")
+        running_jobs = [job for job in jobs if job.status in _RUNNING_STATUSES]
+        running_ids = {job.id for job in running_jobs}
+        self._stages = {
+            job_id: value
+            for job_id, value in self._stages.items()
+            if job_id in running_ids
+        }
+        if current is None or current.id not in running_ids:
+            current = running_jobs[-1] if running_jobs else current
         retryable = {
             job.id
             for job in jobs
@@ -75,12 +90,18 @@ class CrontrolReporter:
             ),
             None,
         )
-        running = current is not None and current.status in _RUNNING_STATUSES
+        running = bool(running_jobs)
         result = "FAIL" if latest_terminal and latest_terminal.status == "failed" else "PASS"
         current_stage = "idle"
         if current is not None:
-            current_stage = _display(stage or self._job_stage(current), 120)
-        schedule = self._schedule(current, stage, queued)
+            requested_stage = stage if current.id == current_job_id else None
+            current_stage = _display(
+                self._stages.get(current.id)
+                or requested_stage
+                or self._job_stage(current),
+                120,
+            )
+        schedule = self._schedule(current, current_stage, queued, len(running_jobs))
         branch = current.branch if current is not None else self.settings.branch
         payload: dict[str, object] = {
             "id": self.settings.job_id,
@@ -97,6 +118,19 @@ class CrontrolReporter:
             "currentRepository": current.repository if current is not None else None,
             "currentStage": current_stage,
             "queuedJobs": queued,
+            "runningJobCount": len(running_jobs),
+            "maxConcurrentJobs": self.config.server.max_concurrent_jobs,
+            "runningJobs": [
+                {
+                    "jobId": job.id,
+                    "repository": job.repository,
+                    "branch": job.branch,
+                    "stage": _display(
+                        self._stages.get(job.id) or self._job_stage(job), 120
+                    ),
+                }
+                for job in reversed(running_jobs)
+            ],
             "launchdLabel": "com.inswave.code-fix-agent",
             "healthUrl": _health_url(self.config),
         }
@@ -104,12 +138,14 @@ class CrontrolReporter:
             payload["lastRun"] = latest_terminal.updated_at
         return payload
 
-    def _schedule(self, current: Job | None, stage: str | None, queued: int) -> str:
+    def _schedule(
+        self, current: Job | None, stage: str, queued: int, running_count: int
+    ) -> str:
         if current is None:
             return f"유휴 · 대기 {queued}건"
         repository = current.repository.rsplit("/", 1)[-1]
-        current_stage = _display(stage or self._job_stage(current), 120)
-        return f"{repository} #{current.id} · {current_stage} · 대기 {queued}건"
+        prefix = f"동시 {running_count}건 · " if running_count > 1 else ""
+        return f"{prefix}{repository} #{current.id} · {stage} · 대기 {queued}건"
 
     def _retryable(self, job: Job) -> bool:
         repository = self.config.repository_by_id(job.repository_id)

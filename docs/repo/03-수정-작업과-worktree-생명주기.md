@@ -59,7 +59,16 @@ origin/dev 최신 commit
 - fix commit
 - push 시도와 event log
 
-한 finding의 파일 변경을 다른 finding worktree와 합치지 않는다. 상시 worker는 작업을 순차 처리하며 실패한 job을 설정된 횟수만큼 끝낸 뒤 다음 job으로 넘어간다. 재시도할 때는 실패한 worktree를 제거하고 최신 target에서 새 worktree를 만든다. 여러 `run-once` 프로세스를 동시에 실행해 원격 target이 바뀌면 뒤 작업이 merge 절차를 수행한다.
+한 finding의 파일 변경을 다른 finding worktree와 합치지 않는다. `serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 세 작업은 각자 branch와 worktree를 만들고, 한 작업의 검증 실패는 그 작업 worktree에서만 보완한다. 검증 통과 뒤 commit과 push를 끝낸 작업의 worktree만 제거한다. 프로세스 오류로 worktree를 유지하지 못한 경우에는 최신 target에서 다시 만든다. 다른 작업이 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
+
+```toml
+[server]
+max_concurrent_jobs = 3
+```
+
+허용 범위는 `1..32`다. `run-once`와 `submit --run-now`는 이 값과 관계없이 호출당 한 건만 처리한다.
+
+같은 `local_path`를 쓰는 worker의 clone, fetch, worktree 등록·제거와 prune은 Git 공용 메타데이터 충돌을 막기 위해 짧게 직렬화한다. worktree 생성 뒤 Codex 수정과 하네스 실행은 서로 겹쳐서 진행한다. push는 작업별로 시도하며 원격 선행 변경은 target 이동 절차에서 처리한다.
 
 ## 1. 로컬 저장소 준비
 
@@ -290,7 +299,7 @@ git -C /configured/local_path worktree list --porcelain
 
 `src/fix_agent/discord.py`는 `code-review-agent`의 Discord 형식에 맞춰 payload를 만들고 `src/fix_agent/notify.py`가 저장소별 웹훅으로 전송한다.
 
-같은 event 흐름은 `src/fix_agent/crontrol.py`가 Crontrol의 `Code Fix Agent` 행에 현재 repository, job ID, 단계와 대기 건수로 요약한다. Crontrol에는 finding 원문, 파일 경로, 판단 사유나 명령 출력을 보내지 않는다. 연결 실패는 로컬 로그에 남기고 작업 상태를 바꾸지 않는다.
+같은 event 흐름은 `src/fix_agent/crontrol.py`가 Crontrol의 `Code Fix Agent` 행에 동시 실행 수, 작업별 repository·job ID·단계와 대기 건수로 요약한다. Crontrol에는 finding 원문, 파일 경로, 판단 사유나 명령 출력을 보내지 않는다. 연결 실패는 로컬 로그에 남기고 작업 상태를 바꾸지 않는다.
 
 - embed payload와 `Content-Type: application/json` 전제
 - `username = "Code Fix Agent"`

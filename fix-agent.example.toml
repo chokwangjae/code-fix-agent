@@ -8,6 +8,7 @@ port = 7081
 # token = "replace-with-a-long-random-secret"
 token_env = "CODE_FIX_TOKEN"
 max_body_bytes = 1048576
+max_concurrent_jobs = 3
 
 [crontrol]
 enabled = true

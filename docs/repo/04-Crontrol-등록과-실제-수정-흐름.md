@@ -16,16 +16,19 @@ Crontrol에는 리뷰 판정 내용이 아니라 수정 에이전트의 실행 �
 | `scope` | `external` |
 | `sessionId` | `launchd` |
 | `status` | `active` |
-| `schedule` | 현재 repository·job ID·단계·대기 건수 |
+| `schedule` | 동시 실행 수·대표 repository·job ID·단계·대기 건수 |
 | `branch` | 현재 작업 branch, 유휴 시 `main` |
-| `running` | worker가 finding 하나를 처리 중인지 여부 |
+| `running` | worker가 finding을 하나 이상 처리 중인지 여부 |
+| `runningJobCount` | 현재 실행 중인 job 수 |
+| `maxConcurrentJobs` | 설정된 최대 동시 job 수 |
+| `runningJobs` | 실행 중인 job별 ID·repository·branch·단계 |
 | `lastResult` | 최근 종료 작업 기준 `PASS` 또는 `FAIL` |
 | `launchdLabel` | `com.inswave.code-fix-agent` |
 | `healthUrl` | `http://127.0.0.1:7081/health` |
 
 Crontrol의 공통 계약은 NAME에 ``[repository] 작업명`` 형식을 권장하지만, 이 서비스는 repository 이름을 읽기 좋게 바꾼 `Code Fix Agent`로만 표시한다. bracket이나 organization 이름을 NAME 앞에 붙이지 않는다. 이 프로젝트의 Crontrol 등록·재등록·상태 동기화에서는 `name: Code Fix Agent`를 고정값으로 사용한다. branch는 별도 필드로 보낸다. `status`는 등록 상태, `running`은 현재 실행 여부, `lastResult`는 최근 확인 결과다. 세 필드의 의미를 섞지 않는다.
 
-이 서버는 `KeepAlive`로 상시 실행되므로 실제 cron 주기가 없다. SCHEDULE은 이 프로젝트의 표시 예외로 사용한다. 작업 중에는 `Matrix_Mobile_V2 #1 · finding 검증 중 · 대기 19건`, 유휴 상태에는 `유휴 · 대기 0건`처럼 표시된다. Crontrol은 이 문자열을 실행하지 않는다. 정기 launchd 작업을 별도로 추가할 때는 실제 주기를 5-field cron으로 보내야 한다.
+이 서버는 `KeepAlive`로 상시 실행되므로 실제 cron 주기가 없다. SCHEDULE은 이 프로젝트의 표시 예외로 사용한다. 작업 하나는 `Matrix_Mobile_V2 #21 · finding 검증 중 · 대기 4건`, 여러 작업은 `동시 3건 · Matrix_Mobile_V2 #23 · 테스트 중 · 대기 4건`, 유휴 상태는 `유휴 · 대기 0건`처럼 표시된다. Crontrol은 이 문자열을 실행하지 않는다. 정기 launchd 작업을 별도로 추가할 때는 실제 주기를 5-field cron으로 보내야 한다.
 
 동기화는 먼저 `PATCH /api/jobs/code-fix-agent-server`를 호출한다. 행이 없어서 `404`가 반환되면 canonical 전체 payload를 `POST /api/jobs`로 등록한다. Crontrol 코드나 설정 파일은 바꾸지 않는다. 연결 실패와 인증 오류는 로그에 남기되 수정 작업의 상태, commit과 push 결과에는 영향을 주지 않는다.
 
@@ -74,9 +77,9 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 Dashboard의 `All` 또는 `External` 범위에서 `Code Fix Agent`를 찾을 수 있어야 한다. NAME 보조 줄에는 현재 branch가 나온다. SCHEDULE에는 현재 repository, job ID, 단계와 대기 건수가 표시된다. STATUS는 작업 중이면 `running · last PASS/FAIL`, 유휴 상태면 최근 결과인 `PASS` 또는 `FAIL`이다. Crontrol DB reset이나 서버 이전 뒤에도 다음 동기화에서 같은 ID와 이름으로 자동 등록된다.
 
-worker는 job을 claim할 때, 주요 단계 event를 기록할 때, 작업이 종료될 때 Crontrol을 갱신한다. 같은 payload는 프로세스 내부에서 다시 보내지 않는다. `running`은 LaunchAgent 프로세스 생존 여부가 아니라 실제 finding 처리 여부다. 서버 생존 상태는 `healthUrl`과 `/health`로 확인한다. `disabled`는 운영자가 연동 행을 비활성화할 때만 사용한다.
+worker는 job을 claim할 때, 주요 단계 event를 기록할 때, 작업이 종료될 때 Crontrol을 갱신한다. 최대 3개 worker가 하나의 reporter를 공유하므로 payload 전송과 단계 목록 갱신은 직렬화된다. 같은 payload는 프로세스 내부에서 다시 보내지 않는다. `running`은 LaunchAgent 프로세스 생존 여부가 아니라 실제 finding 처리 여부다. 서버 생존 상태는 `healthUrl`과 `/health`로 확인한다. `disabled`는 운영자가 연동 행을 비활성화할 때만 사용한다.
 
-표시 단계는 작업 준비, Git 검증 완료, finding 검증 중·완료, 수정 중·수정안 생성 완료, 변경 정책 검증 완료, 테스트 중, 수정 결과 검증 중·완료, 재시도 대기, 커밋 완료, 원격 target 병합, 충돌 해결, push 중·완료와 최종 완료·제외·실패다. `currentJobId`, `currentRepository`, `currentStage`, `queuedJobs`도 client-defined field로 함께 저장되며 read-only API에서 확인할 수 있다. finding 원문, 파일 경로, 판단 사유, prompt와 명령 출력은 보내지 않는다.
+표시 단계는 작업 준비, Git 검증 완료, finding 검증 중·완료, 수정 중·수정안 생성 완료, 변경 정책 검증 완료, 테스트 중, 수정 결과 검증 중·완료, 검증 실패 보완 중, 재시도 대기, 커밋 완료, 원격 target 병합, 충돌 해결, push 중·완료와 최종 완료·제외·실패다. 대표 작업의 `currentJobId`, `currentRepository`, `currentStage`와 전체 `queuedJobs`, `runningJobCount`, `maxConcurrentJobs`, `runningJobs`를 client-defined field로 함께 저장하며 read-only API에서 확인할 수 있다. finding 원문, 파일 경로, 판단 사유, prompt와 명령 출력은 보내지 않는다.
 
 `[crontrol]`의 `enabled`, URL, ID, 이름, branch, token이나 timeout을 바꾼 뒤에는 `serve` 또는 LaunchAgent를 재시작한다. LaunchAgent에서 `token_env`를 쓴다면 설치 shell에 해당 환경 변수를 설정하고 `fix-agent-launchd --install`을 다시 실행한다.
 
@@ -84,7 +87,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
 
 ## 실제 수정 흐름
 
-작업 단위는 finding 하나다. finding별로 별도 SQLite job, worktree, commit과 push 결과를 만든다.
+작업 단위는 finding 하나다. finding별로 별도 SQLite job, branch, worktree, commit과 push 결과를 만든다. `serve`는 `[server].max_concurrent_jobs = 3`일 때 최대 세 finding을 동시에 처리한다.
 
 1. 리뷰 이벤트 수신
    - `POST /reviews` 또는 `fix-agent submit`으로 `version = 1` 이벤트 수신
@@ -138,9 +141,10 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
     - Crontrol에는 finding 내용 대신 현재 단계와 대기 건수, 최종 결과만 유지
 11. 실패 재시도
     - 오류, 실패한 하네스 명령과 제한한 출력을 SQLite에 기록
-    - `max_attempts = 0`이면 `retry_delay_seconds` 뒤 같은 job부터 재시작
+    - `max_attempts = 0`이면 같은 worktree에서 횟수 제한 없이 보완
     - 처음 통과한 finding 사실 판정과 사유 유지
-    - 최신 target에서 새 worktree를 만들고 이전 실패 내용을 Codex 수정 입력에 포함
+    - 기존 diff와 이전 실패 내용을 Codex 수정 입력에 포함
+    - 프로세스 오류로 worktree를 유지하지 못한 경우에만 `retry_delay_seconds` 뒤 최신 target에서 재시작
     - push 뒤 정리만 실패했다면 기록된 worktree 제거와 prune만 재실행
     - push와 worktree 정리가 끝난 뒤 `completed`로 전환
 

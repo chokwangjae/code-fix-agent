@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -60,7 +61,7 @@ class StateTest(unittest.TestCase):
         self.assertEqual(second.last_error, "harness failed")
         self.assertIsNone(second.next_attempt_at)
 
-    def test_retry_delay_blocks_the_oldest_job(self) -> None:
+    def test_retry_delay_allows_later_job_to_run(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "fix.toml"
@@ -73,12 +74,43 @@ class StateTest(unittest.TestCase):
             )
             config = load_config(config_path)
             parsed = parse_review_event(event())
+            later_event = event()
+            later_event["findings"][0]["fingerprint"] = "sha256:" + "d" * 64
             with StateStore(config.state_dir) as state:
                 state.accept(config.repositories[0], parsed)
+                later = state.accept(
+                    config.repositories[0], parse_review_event(later_event)
+                )
                 first = state.claim_next(config.repositories)
                 state.mark_failed(first.id, "temporary failure", 3600)
                 claimed = state.claim_next(config.repositories)
-        self.assertIsNone(claimed)
+        self.assertEqual(claimed.id, later.job_ids[0])
+
+    def test_three_workers_claim_distinct_jobs(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                for character in "cde":
+                    value = event()
+                    value["findings"][0]["fingerprint"] = (
+                        "sha256:" + character * 64
+                    )
+                    state.accept(
+                        config.repositories[0], parse_review_event(value)
+                    )
+
+            def claim() -> int:
+                with StateStore(config.state_dir) as state:
+                    job = state.claim_next(config.repositories)
+                return job.id
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                claimed = list(executor.map(lambda _: claim(), range(3)))
+
+        self.assertEqual(sorted(claimed), [1, 2, 3])
 
     @staticmethod
     def _config() -> str:

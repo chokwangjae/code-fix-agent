@@ -65,6 +65,9 @@ class CrontrolReporterTest(unittest.TestCase):
         self.assertEqual(payload["currentStage"], "finding 검증 중")
         self.assertEqual(payload["schedule"], "repo #1 · finding 검증 중 · 대기 0건")
         self.assertTrue(payload["running"])
+        self.assertEqual(payload["runningJobCount"], 1)
+        self.assertEqual(payload["maxConcurrentJobs"], 3)
+        self.assertEqual(payload["runningJobs"][0]["jobId"], accepted.job_ids[0])
         serialized = json.dumps(payload)
         self.assertNotIn("Failure is swallowed", serialized)
         self.assertNotIn("src/app.py", serialized)
@@ -115,6 +118,31 @@ class CrontrolReporterTest(unittest.TestCase):
         self.assertEqual(payload["queuedJobs"], 1)
         self.assertEqual(payload["lastResult"], "PASS")
 
+    def test_reports_all_concurrent_jobs_and_stages(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(Path(directory))
+            second_event = event()
+            second_event["findings"][0]["fingerprint"] = "sha256:" + "d" * 64
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                state.accept(
+                    config.repositories[0], parse_review_event(second_event)
+                )
+                first = state.claim_next(config.repositories)
+                second = state.claim_next(config.repositories)
+            opener = RecordingOpener()
+            reporter = CrontrolReporter(config, opener=opener)
+            reporter.sync(first.id, "수정 중")
+            reporter.sync(second.id, "테스트 중")
+
+        payload = json.loads(opener.calls[-1][0].data)
+        self.assertEqual(payload["runningJobCount"], 2)
+        self.assertEqual(payload["schedule"], "동시 2건 · repo #2 · 테스트 중 · 대기 0건")
+        self.assertEqual(
+            {item["jobId"]: item["stage"] for item in payload["runningJobs"]},
+            {first.id: "수정 중", second.id: "테스트 중"},
+        )
+
     @staticmethod
     def _config(root: Path):
         path = root / "fix.toml"
@@ -124,6 +152,7 @@ version = 1
 state_dir = ".state"
 [server]
 token = "intake"
+max_concurrent_jobs = 3
 [crontrol]
 enabled = true
 base_url = "http://127.0.0.1:7070"

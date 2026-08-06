@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import threading
 from typing import Callable, ContextManager, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -53,6 +54,7 @@ class DiscordNotifier:
     ) -> None:
         self.config = config
         self.opener = opener
+        self._lock = threading.RLock()
 
     def initialize_cursors(self) -> None:
         with StateStore(self.config.state_dir) as state:
@@ -62,6 +64,12 @@ class DiscordNotifier:
 
     def dispatch_pending(
         self, *, force: bool = False, max_events: int = 100
+    ) -> DiscordDispatchResult:
+        with self._lock:
+            return self._dispatch_pending(force=force, max_events=max_events)
+
+    def _dispatch_pending(
+        self, *, force: bool, max_events: int
     ) -> DiscordDispatchResult:
         if max_events < 1:
             raise ValueError("max_events must be positive")

@@ -75,7 +75,7 @@ class StateStore:
     def __init__(self, state_dir: Path) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         self.path = state_dir / "jobs.db"
-        self.connection = sqlite3.connect(self.path)
+        self.connection = sqlite3.connect(self.path, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self._create_schema()
@@ -397,13 +397,16 @@ class StateStore:
     def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
         limits = {repository.id: repository.max_attempts for repository in repositories}
         now = _now()
-        with self.connection:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
             rows = self.connection.execute(
                 """
                 SELECT * FROM jobs
                 WHERE status IN ('queued', 'failed')
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 ORDER BY id
-                """
+                """,
+                (now,),
             ).fetchall()
             row = next(
                 (
@@ -418,8 +421,7 @@ class StateStore:
                 None,
             )
             if row is None:
-                return None
-            if row["next_attempt_at"] is not None and row["next_attempt_at"] > now:
+                self.connection.commit()
                 return None
             cursor = self.connection.execute(
                 """
@@ -431,6 +433,7 @@ class StateStore:
                 (_now(), row["id"]),
             )
             if cursor.rowcount != 1:
+                self.connection.rollback()
                 return None
             claimed = self.connection.execute(
                 "SELECT * FROM jobs WHERE id = ?", (row["id"],)
@@ -442,6 +445,10 @@ class StateStore:
                 {"attempt": row["attempts"] + 1},
                 status="validating",
             )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
         return Job(**dict(claimed)) if claimed is not None else None
 
     def record_precheck(self, job_id: int, valid: bool, reason: str) -> None:

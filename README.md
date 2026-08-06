@@ -27,6 +27,7 @@ HTTP 수신 token은 TOML 직접값과 환경 변수 중 하나를 선택한다.
 ```toml
 [server]
 token = "CODE_FIX_TOKEN으로 쓸 긴 난수"
+max_concurrent_jobs = 3
 
 [[repositories]]
 # 다른 저장소 설정 생략
@@ -52,8 +53,8 @@ curl http://127.0.0.1:7081/health
 - 대상 `AGENTS.md`, 추가 지침과 저장소 하네스 적용
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
-- finding별 최신 target 기반 detached worktree, 원격 이동 시 merge·재검증
-- 이전 실패 원인과 하네스 출력을 동일 worktree에서 반영, push·worktree 정리 뒤 완료 처리
+- finding별 최신 target 기반 독립 detached worktree, 원격 이동 시 merge·재검증
+- 최대 3개 작업 동시 실행, 같은 작업의 실패 원인과 하네스 출력을 동일 worktree에서 반영
 - append-only 작업 event 기록과 Discord notifier용 순차 event ID
 - `code-review-agent` 규격 호환 저장소별 Discord 알림, 검증·수정 단계 통지와 실패 재시도
 - Crontrol에 현재 repository, job ID, 처리 단계와 대기 건수 자동 동기화
@@ -76,7 +77,7 @@ timeout_seconds = 30
 .venv/bin/fix-agent notify-once --config fix-agent.toml --force
 ```
 
-Crontrol 연동은 전역 `[crontrol]`에서 설정한다. 활성화하면 같은 ID의 `Code Fix Agent` 행에 현재 단계를 자동 반영한다. 로컬 Crontrol에 API token이 없으면 `token`과 `token_env`를 모두 생략한다.
+Crontrol 연동은 전역 `[crontrol]`에서 설정한다. 활성화하면 같은 ID의 `Code Fix Agent` 행에 실행 중인 작업 수와 각 작업의 현재 단계를 자동 반영한다. 로컬 Crontrol에 API token이 없으면 `token`과 `token_env`를 모두 생략한다.
 
 ```toml
 [crontrol]
@@ -98,6 +99,8 @@ curl http://127.0.0.1:7070/api/v1/jobs
 `[crontrol]` 설정을 바꾼 뒤에는 `serve` 또는 LaunchAgent를 재시작해야 자동 단계 동기화에 반영된다.
 
 자동 트리거는 인증된 `POST /reviews` 요청으로 연결한다. 같은 장비에서 수동으로 전달할 때는 `fix-agent submit`을 사용할 수 있다.
+
+`serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 job, branch와 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
 severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 기존 diff와 실패 출력을 Codex에 전달해 보완한다. 모든 검증을 통과한 뒤 commit과 push를 실행하고 worktree를 제거한다. 프로세스 오류로 작업이 중단된 경우에만 `retry_delay_seconds` 뒤 최신 target에서 worktree를 다시 만든다.
 
