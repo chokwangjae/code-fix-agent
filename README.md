@@ -51,6 +51,7 @@ curl http://127.0.0.1:7081/health
 - `Matrix_Mobile_V2`, `TestSquare-Fable`의 `dev` branch 설정 포함
 - Major·Minor finding 처리, Critical 기본 제외
 - 대상 `AGENTS.md`, 추가 지침과 저장소 하네스 적용
+- 정책 허용 경로 안의 신규 파일 추가와 기존 파일 삭제 허용
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
 - finding별 최신 target 기반 독립 detached worktree, 원격 이동 시 merge·재검증

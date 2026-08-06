@@ -29,6 +29,8 @@ max_remote_merge_attempts = 3
 
 `github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
 
+운영 정책은 허용 경로 안의 `allow_new_files`와 `allow_deletions`를 모두 `true`로 둔다. 따라서 수정에 필요한 소스·테스트 파일을 추가하거나 기존 파일을 삭제할 수 있다. `allowed_paths`, `denied_paths`, 파일·line 수 제한과 finding 파일 변경 조건은 그대로 적용한다.
+
 `remote`와 `target_branch`가 최신 코드 조회와 결과 push 위치를 정한다. `git_author_name`과 `git_author_email`은 자동 생성 commit과 원격 merge commit에만 사용하며 GitHub 인증에는 관여하지 않는다. 위 설정의 작업 경로는 다음과 같다.
 
 ```text
