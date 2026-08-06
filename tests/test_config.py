@@ -24,6 +24,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.discord.webhook_url_env, "FIX_DISCORD_WEBHOOK_URL")
         self.assertEqual(repository.discord.timeout_seconds, 20)
         self.assertEqual(repository.additional_instructions, "Preserve the public API.")
+        self.assertEqual(repository.git_author_name, "broken-agent")
+        self.assertEqual(repository.git_author_email, "g_uapm@inswave.com")
         self.assertEqual(repository.policy.max_changed_files, 3)
         self.assertEqual(repository.policy.skip_reason("Critical", "src/a.py", "sha256:" + "a" * 64), "severity is not enabled: Critical")
         self.assertIsNotNone(repository.policy.skip_reason("Major", ".github/workflows/a.yml", "sha256:" + "a" * 64))
@@ -197,6 +199,8 @@ publish_mode = "direct"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = [["python3", "-m", "unittest"]]
 additional_instructions = "Preserve the public API."
+git_author_name = "broken-agent"
+git_author_email = "g_uapm@inswave.com"
 [repositories.discord]
 enabled = true
 webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"

@@ -147,6 +147,8 @@ local_path = "{repository}"
 publish_mode = "{publish_mode}"
 github_token = "test-only-token"
 test_commands = []
+git_author_name = "broken-agent"
+git_author_email = "g_uapm@inswave.com"
 """,
             encoding="utf-8",
         )

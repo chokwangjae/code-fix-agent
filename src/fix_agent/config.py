@@ -99,6 +99,8 @@ class RepositoryConfig:
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
     commit_message_template: str
+    git_author_name: str
+    git_author_email: str
     command_timeout_seconds: int
     max_attempts: int
     retry_delay_seconds: int
@@ -281,6 +283,14 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
     github_token, github_token_env = _credential_source(
         raw, "github_token", "github_token_env", context, required=False
     )
+    git_author_name = raw.get("git_author_name", "Code Fix Agent")
+    git_author_email = raw.get(
+        "git_author_email", "code-fix-agent@users.noreply.github.com"
+    )
+    if not isinstance(git_author_name, str) or not git_author_name.strip():
+        raise FixAgentError(f"{context}.git_author_name must be a non-empty string")
+    if not isinstance(git_author_email, str) or not git_author_email.strip():
+        raise FixAgentError(f"{context}.git_author_email must be a non-empty string")
     return RepositoryConfig(
         id=_required_string(raw, "id", context),
         github=github,
@@ -294,6 +304,8 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
         commit_message_template=commit_message_template.strip(),
+        git_author_name=git_author_name.strip(),
+        git_author_email=git_author_email.strip(),
         command_timeout_seconds=_positive_integer(
             execution.get("command_timeout_seconds", 1800),
             f"{context}.execution.command_timeout_seconds",

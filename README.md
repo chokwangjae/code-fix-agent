@@ -22,6 +22,8 @@ export MATRIX_MOBILE_FIX_DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/.
 
 HTTP 수신 token은 TOML 직접값과 환경 변수 중 하나를 선택한다. TOML에 `server.token`을 넣으면 `server.token_env`를 같이 적지 않는다. GitHub 인증은 `github_token`, `github_token_env`의 실제 값, `gh auth token --hostname github.com` 순으로 찾는다. PC에서 `gh auth login`을 완료했다면 GitHub token 설정을 생략할 수 있다.
 
+자동 생성 commit과 원격 merge commit의 작성자는 저장소별 `git_author_name`, `git_author_email`로 설정한다. 이 값은 GitHub 인증에 쓰지 않는다.
+
 ```toml
 [server]
 token = "CODE_FIX_TOKEN으로 쓸 긴 난수"
@@ -29,6 +31,8 @@ token = "CODE_FIX_TOKEN으로 쓸 긴 난수"
 [[repositories]]
 # 다른 저장소 설정 생략
 github_token = "저장소 쓰기 권한 GitHub token"
+git_author_name = "broken-agent"
+git_author_email = "g_uapm@inswave.com"
 ```
 
 `CODE_FIX_TOKEN`은 외부에서 발급받는 값이 아니다. HTTP 송신자와 fix agent가 같이 아는 공유 비밀값으로, 기술적으로는 임의의 비어 있지 않은 문자열이면 된다. 추측 공격을 막으려면 `openssl rand -hex 32`로 생성한 64자 난수를 사용한다. `fix-agent submit`만 쓰고 `serve`를 실행하지 않으면 수신 token이 필요 없다.

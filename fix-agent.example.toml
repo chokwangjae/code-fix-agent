@@ -31,6 +31,8 @@ publish_mode = "direct"
 test_commands = []
 additional_instructions = ""
 commit_message_template = "fix: resolve review finding {fingerprint_short}"
+git_author_name = "broken-agent"
+git_author_email = "g_uapm@inswave.com"
 
 [repositories.discord]
 enabled = true

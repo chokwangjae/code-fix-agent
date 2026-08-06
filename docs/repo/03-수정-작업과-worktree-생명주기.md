@@ -15,6 +15,8 @@ local_path = "../Matrix_Mobile_V2"
 remote = "origin"
 publish_mode = "direct"
 github_token_env = "MATRIX_MOBILE_FIX_GITHUB_TOKEN"
+git_author_name = "broken-agent"
+git_author_email = "g_uapm@inswave.com"
 
 [repositories.execution]
 command_timeout_seconds = 3600
@@ -27,7 +29,7 @@ max_remote_merge_attempts = 3
 
 `github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
 
-`remote`와 `target_branch`가 최신 코드 조회와 결과 push 위치를 정한다. 위 설정의 작업 경로는 다음과 같다.
+`remote`와 `target_branch`가 최신 코드 조회와 결과 push 위치를 정한다. `git_author_name`과 `git_author_email`은 자동 생성 commit과 원격 merge commit에만 사용하며 GitHub 인증에는 관여하지 않는다. 위 설정의 작업 경로는 다음과 같다.
 
 ```text
 origin/dev 최신 commit
@@ -137,8 +139,8 @@ Codex와 테스트 환경에서는 GitHub token, 일반적인 token·secret·pas
 
 ```bash
 git add --all
-git -c user.name="Code Fix Agent" \
-    -c user.email="code-fix-agent@users.noreply.github.com" \
+git -c user.name="broken-agent" \
+    -c user.email="g_uapm@inswave.com" \
     -c commit.gpgsign=false \
     commit -m "<commit_message_template>"
 ```
@@ -156,8 +158,8 @@ autofix/<repository-id>/<fingerprint 앞 12자리>
 commit 뒤 `origin/dev`를 다시 fetch한다. 현재 원격 commit이 workspace base와 같으면 push 단계로 간다. 다르면 `target_moved` event를 남기고 worktree에서 최신 target을 merge한다.
 
 ```bash
-git -c user.name="Code Fix Agent" \
-    -c user.email="code-fix-agent@users.noreply.github.com" \
+git -c user.name="broken-agent" \
+    -c user.email="g_uapm@inswave.com" \
     -c commit.gpgsign=false \
     merge --no-edit <latest origin/dev commit>
 ```
@@ -194,8 +196,8 @@ Codex는 conflict marker를 제거하고 파일만 수정한다. `git add`, comm
 ```bash
 git add --all
 git diff --cached --check
-git -c user.name="Code Fix Agent" \
-    -c user.email="code-fix-agent@users.noreply.github.com" \
+git -c user.name="broken-agent" \
+    -c user.email="g_uapm@inswave.com" \
     -c commit.gpgsign=false \
     commit --no-edit
 ```

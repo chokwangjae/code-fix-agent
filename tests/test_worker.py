@@ -196,6 +196,13 @@ class WorkerTest(unittest.TestCase):
             with StateStore(config.state_dir) as state:
                 completed = state.jobs()[0]
                 event_types = [event.event_type for event in state.events(completed.id)]
+            author = subprocess.run(
+                ["git", "show", "-s", "--format=%an|%ae", completed.result_commit],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
         self.assertEqual(completed.status, "completed")
         self.assertIsNone(completed.pr_url)
         self.assertEqual(worker.pushed_branches, ["main"])
@@ -203,6 +210,7 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("worktree_created", event_types)
         self.assertIn("worktree_removed", event_types)
         self.assertIn("push_completed", event_types)
+        self.assertEqual(author, "broken-agent|g_uapm@inswave.com")
 
     def test_merges_moved_target_and_revalidates_before_push(self) -> None:
         with TemporaryDirectory() as directory:
