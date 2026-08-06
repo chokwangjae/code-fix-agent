@@ -76,7 +76,7 @@ Dashboard의 `All` 또는 `External` 범위에서 `Code Fix Agent`를 찾을 수
 
 worker는 job을 claim할 때, 주요 단계 event를 기록할 때, 작업이 종료될 때 Crontrol을 갱신한다. 같은 payload는 프로세스 내부에서 다시 보내지 않는다. `running`은 LaunchAgent 프로세스 생존 여부가 아니라 실제 finding 처리 여부다. 서버 생존 상태는 `healthUrl`과 `/health`로 확인한다. `disabled`는 운영자가 연동 행을 비활성화할 때만 사용한다.
 
-표시 단계는 작업 준비, Git 검증 완료, finding 검증 중·완료, 수정 중·적용 완료, 변경 정책 검증 완료, 테스트 중, 수정 결과 검증 중·완료, 커밋 완료, 원격 target 병합, 충돌 해결, push 중·완료와 최종 완료·제외·실패다. `currentJobId`, `currentRepository`, `currentStage`, `queuedJobs`도 client-defined field로 함께 저장되며 read-only API에서 확인할 수 있다. finding 원문, 파일 경로, 판단 사유, prompt와 명령 출력은 보내지 않는다.
+표시 단계는 작업 준비, Git 검증 완료, finding 검증 중·완료, 수정 중·수정안 생성 완료, 변경 정책 검증 완료, 테스트 중, 수정 결과 검증 중·완료, 재시도 대기, 커밋 완료, 원격 target 병합, 충돌 해결, push 중·완료와 최종 완료·제외·실패다. `currentJobId`, `currentRepository`, `currentStage`, `queuedJobs`도 client-defined field로 함께 저장되며 read-only API에서 확인할 수 있다. finding 원문, 파일 경로, 판단 사유, prompt와 명령 출력은 보내지 않는다.
 
 `[crontrol]`의 `enabled`, URL, ID, 이름, branch, token이나 timeout을 바꾼 뒤에는 `serve` 또는 LaunchAgent를 재시작한다. LaunchAgent에서 `token_env`를 쓴다면 설치 shell에 해당 환경 변수를 설정하고 `fix-agent-launchd --install`을 다시 실행한다.
 
@@ -109,7 +109,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 사실 검증을 통과한 finding만 수정
    - 대상 프로젝트의 `AGENTS.md`, 추가 지침과 하네스 준수
    - 제안된 해결법을 명령으로 취급하지 않고 최소 변경으로 결함 해소
-   - 수정 시작과 적용 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
+   - 수정 시작과 수정안 생성 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
 6. 정책·테스트·결과 검증
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스 실행
@@ -136,6 +136,13 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
     - 임시 root 삭제와 `git worktree prune` 실행
     - Discord가 활성화됐으면 push·완료·실패 이벤트 전송
     - Crontrol에는 finding 내용 대신 현재 단계와 대기 건수, 최종 결과만 유지
+11. 실패 재시도
+    - 오류, 실패한 하네스 명령과 제한한 출력을 SQLite에 기록
+    - `max_attempts = 0`이면 `retry_delay_seconds` 뒤 같은 job부터 재시작
+    - 처음 통과한 finding 사실 판정과 사유 유지
+    - 최신 target에서 새 worktree를 만들고 이전 실패 내용을 Codex 수정 입력에 포함
+    - push 뒤 정리만 실패했다면 기록된 worktree 제거와 prune만 재실행
+    - push와 worktree 정리가 끝난 뒤 `completed`로 전환
 
 ## push 전 중단 조건
 
@@ -149,11 +156,11 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
 - merge 충돌 미해결 또는 재검증 실패
 - target 반복 이동으로 merge 허용 횟수 초과
 
-worktree 정리는 push 후에도 실패할 수 있다. 이때는 이미 push한 commit을 되돌리지 않고 작업을 `failed`로 남긴다. 운영자는 `worktree_cleanup_incomplete` event와 Git worktree 등록 상태를 확인한 뒤 수동으로 조정한다.
+worktree 정리는 push 후에도 실패할 수 있다. 에이전트는 이미 push한 commit을 유지하고 기록된 관리 경로의 제거와 prune을 다시 시도한다. 경로가 `state_dir/worktrees/fix-*/checkout` 밖이면 자동 정리를 거부하며 `worktree_cleanup_incomplete` event로 확인할 수 있다.
 
 ## 기록 위치
 
-`state_dir/jobs.db`의 `jobs`에는 finding과 사전·사후 판단 근거, 테스트, commit과 PR 결과를 보관한다. `job_events`에는 worktree, target 이동, merge 충돌, push와 정리 절차를 순서대로 남긴다. Discord 전송 커서와 재시도 상태는 `discord_cursors`에 분리한다.
+`state_dir/jobs.db`의 `jobs`에는 finding과 사전·사후 판단 근거, 테스트, 직전 실패, 다음 시도 시각, commit과 PR 결과를 보관한다. `job_events`에는 worktree, target 이동, merge 충돌, 재시도, push와 정리 절차를 순서대로 남긴다. Discord 전송 커서와 전송 재시도 상태는 `discord_cursors`에 분리한다.
 
 실제 실행 이력은 다음 명령으로 확인한다.
 

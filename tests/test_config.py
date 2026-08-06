@@ -17,6 +17,8 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.crontrol.enabled)
         self.assertEqual(repository.target_branch, "main")
         self.assertEqual(repository.publish_mode, "direct")
+        self.assertEqual(repository.max_attempts, 0)
+        self.assertEqual(repository.retry_delay_seconds, 15)
         self.assertEqual(repository.max_remote_merge_attempts, 4)
         self.assertTrue(repository.discord.enabled)
         self.assertEqual(repository.discord.webhook_url_env, "FIX_DISCORD_WEBHOOK_URL")
@@ -43,6 +45,16 @@ class ConfigTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(FixAgentError, "publish_mode"):
+                load_config(path)
+
+    def test_rejects_negative_retry_settings(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            path.write_text(
+                self._config().replace("max_attempts = 0", "max_attempts = -1"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(FixAgentError, "non-negative"):
                 load_config(path)
 
     def test_enabled_discord_requires_one_webhook_source(self) -> None:
@@ -190,6 +202,8 @@ enabled = true
 webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"
 timeout_seconds = 20
 [repositories.execution]
+max_attempts = 0
+retry_delay_seconds = 15
 max_remote_merge_attempts = 4
 [repositories.policy]
 allowed_severities = ["Major", "Minor"]

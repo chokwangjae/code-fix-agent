@@ -22,6 +22,7 @@ def job(**overrides: object) -> Job:
         "status": "queued",
         "attempts": 0,
         "last_error": None,
+        "next_attempt_at": None,
         "precheck_status": None,
         "precheck_reason": None,
         "postcheck_status": None,

@@ -5,8 +5,10 @@ import unittest
 
 from fix_agent.command import CommandRunner
 from fix_agent.config import load_config
+from fix_agent.contract import parse_review_event
 from fix_agent.errors import FixAgentError
-from fix_agent.workspace import FixWorkspace
+from fix_agent.state import StateStore
+from fix_agent.workspace import FixWorkspace, reconcile_recorded_worktree
 from fakes import job
 
 
@@ -49,6 +51,57 @@ class WorkspaceTest(unittest.TestCase):
                 (workspace.path / "src/new.py").write_text("new\n", encoding="utf-8")
                 with self.assertRaisesRegex(FixAgentError, "new files are not allowed"):
                     workspace.validate_diff()
+
+    def test_reconciles_recorded_worktree_after_push_cleanup_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path, publish_mode="direct")
+            event = parse_review_event(
+                {
+                    "version": 1,
+                    "repository": "owner/repo",
+                    "branch": "main",
+                    "baseline": baseline,
+                    "target": target,
+                    "findings": [
+                        {
+                            "fingerprint": "sha256:" + "c" * 64,
+                            "severity": "Major",
+                            "commit": target,
+                            "file": "src/app.py",
+                            "line": 1,
+                            "cause": "Failure is swallowed.",
+                            "solution": "Return the failure.",
+                        }
+                    ],
+                }
+            )
+            with StateStore(config.state_dir) as state:
+                job_id = state.accept(config.repositories[0], event).job_ids[0]
+            checkout = config.state_dir / "worktrees" / "fix-reconcile" / "checkout"
+            checkout.parent.mkdir(parents=True)
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(checkout), target],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+            )
+
+            complete = reconcile_recorded_worktree(
+                CommandRunner(),
+                config.repositories[0],
+                config.state_dir,
+                job_id,
+                str(checkout),
+            )
+            with StateStore(config.state_dir) as state:
+                events = state.events(job_id)
+
+        self.assertTrue(complete)
+        self.assertFalse(checkout.parent.exists())
+        self.assertEqual(events[-1].event_type, "worktree_removed")
+        self.assertIn('"reconciliation": true', events[-1].details_json)
 
     @staticmethod
     def _repository(root: Path) -> tuple[Path, str, str]:

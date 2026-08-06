@@ -43,6 +43,30 @@ class CodexAgentTest(unittest.TestCase):
         self.assertIn("workspace-write", command)
         self.assertIn("Preserve the API.", options["input_text"])
 
+    def test_retry_fix_receives_previous_failure_and_harness_output(self) -> None:
+        runner = FakeRunner("")
+        previous_tests = (
+            '[{"command":["bash","check.sh"],"returncode":1,'
+            '"stdout":"artifact is stale","stderr":""}]'
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            CodexAgent(runner, "/usr/bin/codex").apply_fix(
+                repository,
+                job(
+                    attempts=2,
+                    last_error="configured test command failed",
+                    tests_json=previous_tests,
+                ),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+            )
+        prompt = runner.calls[0][1]["input_text"]
+        self.assertIn("retry attempt 2", prompt)
+        self.assertIn("configured test command failed", prompt)
+        self.assertIn("bash check.sh (exit 1): artifact is stale", prompt)
+        self.assertIn("Do not hide, skip, or weaken repository checks", prompt)
+
     @staticmethod
     def _repository(root: Path):
         path = root / "fix.toml"

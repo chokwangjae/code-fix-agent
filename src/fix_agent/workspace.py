@@ -558,3 +558,61 @@ class FixWorkspace:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def reconcile_recorded_worktree(
+    runner: CommandRunner,
+    repository: RepositoryConfig,
+    state_dir: Path,
+    job_id: int,
+    recorded_path: str,
+) -> bool:
+    worktree_root = (state_dir / "worktrees").resolve()
+    path = Path(recorded_path).resolve()
+    if (
+        path.name != "checkout"
+        or not path.is_relative_to(worktree_root)
+        or not path.parent.name.startswith("fix-")
+    ):
+        raise FixAgentError("recorded worktree path is outside the managed root")
+    result = runner.run(
+        ["git", "worktree", "remove", "--force", str(path)],
+        cwd=repository.local_path,
+        check=False,
+    )
+    shutil.rmtree(path.parent, ignore_errors=True)
+    prune = runner.run(
+        ["git", "worktree", "prune"],
+        cwd=repository.local_path,
+        check=False,
+    )
+    listed = runner.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repository.local_path,
+        check=False,
+    )
+    registered = any(
+        line == f"worktree {path}" for line in listed.stdout.splitlines()
+    )
+    complete = (
+        not path.parent.exists()
+        and prune.returncode == 0
+        and listed.returncode == 0
+        and not registered
+    )
+    with StateStore(state_dir) as state:
+        state.record_event(
+            job_id,
+            "worktree_removed" if complete else "worktree_cleanup_incomplete",
+            "recorded worktree cleanup was retried",
+            {
+                "path": str(path),
+                "remove_returncode": result.returncode,
+                "prune_returncode": prune.returncode,
+                "list_returncode": listed.returncode,
+                "root_exists": path.parent.exists(),
+                "registered": registered,
+                "reconciliation": True,
+            },
+        )
+    return complete

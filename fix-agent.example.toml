@@ -41,7 +41,8 @@ timeout_seconds = 30
 
 [repositories.execution]
 command_timeout_seconds = 1800
-max_attempts = 1
+max_attempts = 0
+retry_delay_seconds = 30
 max_remote_merge_attempts = 3
 
 [repositories.policy]

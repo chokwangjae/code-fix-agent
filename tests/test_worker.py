@@ -5,6 +5,7 @@ import unittest
 
 from fix_agent.codex_agent import Decision
 from fix_agent.command import CommandRunner
+from fix_agent.config import load_config
 from fix_agent.contract import parse_review_event
 from fix_agent.state import StateStore
 from fix_agent.worker import FixWorker
@@ -78,6 +79,26 @@ class PerJobAgent(FakeAgent):
         (workspace / job.file).write_text(
             f"fixed-{job.fingerprint[-1]}\n", encoding="utf-8"
         )
+
+
+class RetryAgent(FakeAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validation_calls = 0
+        self.fix_calls = 0
+
+    def validate_finding(
+        self, repository, job, workspace, environment, workspace_base=None
+    ):
+        self.validation_calls += 1
+        return super().validate_finding(
+            repository, job, workspace, environment, workspace_base
+        )
+
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
+        self.fix_calls += 1
+        if self.fix_calls > 1:
+            super().apply_fix(repository, job, workspace, environment, workspace_base)
 
 
 class LocalWorker(FixWorker):
@@ -276,6 +297,60 @@ class WorkerTest(unittest.TestCase):
             event for event in second_events if event.event_type == "worktree_created"
         )
         self.assertNotIn(target, created.details_json)
+
+    def test_validated_job_retries_before_later_jobs_until_completed(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+github_token = "test-only-token"
+test_commands = []
+[repositories.execution]
+max_attempts = 0
+retry_delay_seconds = 0
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target, fingerprint_character="c")
+            self._queue(config, baseline, target, fingerprint_character="d")
+            agent = RetryAgent()
+            worker = LocalWorker(config, CommandRunner(), agent)
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                after_failure = state.jobs()
+            self.assertEqual(after_failure[1].status, "failed")
+            self.assertEqual(after_failure[0].status, "queued")
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                jobs = state.jobs()
+                events = state.events(jobs[1].id)
+
+        self.assertEqual(jobs[1].status, "completed")
+        self.assertEqual(jobs[1].attempts, 2)
+        self.assertEqual(jobs[0].status, "queued")
+        self.assertEqual(agent.validation_calls, 1)
+        self.assertIn("retry_scheduled", [event.event_type for event in events])
+        self.assertIn(
+            "finding_validation_reused", [event.event_type for event in events]
+        )
+        self.assertEqual(
+            [event.event_type for event in events].count("worktree_removed"), 2
+        )
 
     @staticmethod
     def _queue(

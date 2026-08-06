@@ -99,6 +99,22 @@ class CrontrolReporterTest(unittest.TestCase):
             self.assertEqual(opener.calls, [])
             self.assertIn("job does not exist", reporter.last_error)
 
+    def test_retryable_failure_remains_pending(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(Path(directory))
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                job = state.claim_next(config.repositories)
+                state.mark_failed(job.id, "harness failed", 30)
+            opener = RecordingOpener()
+            reporter = CrontrolReporter(config, opener=opener)
+            self.assertTrue(reporter.sync(job.id))
+
+        payload = json.loads(opener.calls[0][0].data)
+        self.assertEqual(payload["currentStage"], "재시도 대기")
+        self.assertEqual(payload["queuedJobs"], 1)
+        self.assertEqual(payload["lastResult"], "PASS")
+
     @staticmethod
     def _config(root: Path):
         path = root / "fix.toml"
@@ -121,6 +137,8 @@ github = "owner/repo"
 branch = "main"
 local_path = "repo"
 test_commands = []
+[repositories.execution]
+max_attempts = 0
 """,
             encoding="utf-8",
         )

@@ -18,9 +18,12 @@ github_token_env = "MATRIX_MOBILE_FIX_GITHUB_TOKEN"
 
 [repositories.execution]
 command_timeout_seconds = 3600
-max_attempts = 1
+max_attempts = 0
+retry_delay_seconds = 30
 max_remote_merge_attempts = 3
 ```
+
+`max_attempts = 0`은 수정 대상으로 확정된 job을 완료할 때까지 횟수 제한 없이 재시도한다. 양수는 최초 시도를 포함한 최대 횟수다. 실패하면 `retry_delay_seconds`만큼 기다린 뒤 같은 job을 먼저 처리하므로 뒤 job이 앞지르지 않는다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
 
 `github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
 
@@ -54,7 +57,7 @@ origin/dev 최신 commit
 - fix commit
 - push 시도와 event log
 
-한 finding의 파일 변경을 다른 finding worktree와 합치지 않는다. 상시 worker는 작업을 순차 처리한다. 여러 `run-once` 프로세스를 동시에 실행해 원격 target이 바뀌면 뒤 작업이 merge 절차를 수행한다.
+한 finding의 파일 변경을 다른 finding worktree와 합치지 않는다. 상시 worker는 작업을 순차 처리하며 실패한 job을 설정된 횟수만큼 끝낸 뒤 다음 job으로 넘어간다. 재시도할 때는 실패한 worktree를 제거하고 최신 target에서 새 worktree를 만든다. 여러 `run-once` 프로세스를 동시에 실행해 원격 target이 바뀌면 뒤 작업이 merge 절차를 수행한다.
 
 ## 1. 로컬 저장소 준비
 
@@ -239,7 +242,7 @@ git worktree prune
 - `worktree_removed`: worktree 제거 명령 성공, 임시 root 삭제 확인
 - `worktree_cleanup_incomplete`: 제거 명령 실패 또는 임시 root 잔존
 
-PR 방식의 PR 생성은 worktree 제거 뒤에 실행한다. direct 방식은 worktree 제거 뒤 작업을 `completed`로 바꾼다. push된 원격 branch, SQLite 기록과 PR은 worktree 정리 대상이 아니다.
+PR 방식의 PR 생성은 worktree 제거 뒤에 실행한다. direct 방식은 worktree 제거 뒤 작업을 `completed`로 바꾼다. push 뒤 정리에 실패하면 기록된 관리 경로를 확인해 제거와 prune을 다음 시도에서 다시 실행한다. 이미 push한 commit은 다시 만들지 않는다. push된 원격 branch, SQLite 기록과 PR은 worktree 정리 대상이 아니다.
 
 `SIGKILL`이나 장비 전원 종료는 Python 정리 경로를 실행하지 못한다. 현재 시작 시 잔존 worktree를 자동 회수하는 기능은 없다. 운영자는 event가 없는 오래된 경로를 바로 삭제하지 말고 다음 명령으로 Git 등록 상태와 실행 중 작업을 먼저 확인한다.
 
@@ -295,7 +298,7 @@ git -C /configured/local_path worktree list --porcelain
 - event ID, job ID, repository, branch, finding과 구조화 세부 정보 포함
 - embed 전체 약 5,500자 이내 제한
 
-기본 알림 후보는 finding 검증 시작·완료, 수정 시작·적용 완료, 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·`failed` 상태다. 검증과 수정의 네 단계 알림은 해당 event 기록 직후 전송을 시도한다. 나머지 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
+기본 알림 후보는 finding 검증 시작·완료, 수정 시작·수정안 생성 완료, 재시도 예정, 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·최종 `failed` 상태다. 재시도 시각이 있는 실패는 최종 실패 알림을 보내지 않는다. 검증과 수정의 네 단계 알림은 해당 event 기록 직후 전송을 시도한다. 나머지 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
 
 sender는 `code-review-agent`와 같은 운영 규칙을 따른다.
 
@@ -323,6 +326,7 @@ worktree_created
 finding_git_validated
 status_changed: fixing
 fix_applied
+retry_scheduled
 diff_validated
 status_changed: testing
 status_changed: ready
@@ -335,4 +339,4 @@ worktree_removed
 status_changed: completed
 ```
 
-모든 예외는 `last_error`와 `status_changed: failed`로 끝난다. 오탐과 수정 결과 검증 실패는 `rejected`로 남긴다.
+모든 실행 오류는 `last_error`와 `status_changed: failed`로 기록한다. 재시도할 수 있으면 `retry_scheduled`에 시도 횟수, 다음 시각과 오류를 덧붙인다. 이미 수정 대상으로 확정한 job은 기존 사실 판정과 사유를 유지한다. 다음 Codex 수정은 직전 오류와 실패한 하네스 명령·출력을 받아 새 worktree에서 다시 진행한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.

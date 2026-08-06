@@ -70,6 +70,7 @@ files. Return only JSON in this form:
         workspace_base: str | None = None,
     ) -> None:
         rules = repository.additional_instructions or "No additional instructions."
+        retry_context = _retry_context(job)
         prompt = f"""# Apply one validated code fix
 
 Repository: {job.repository}
@@ -92,6 +93,7 @@ pull request, modify Git configuration, or access credentials.
 
 Repository-specific additional instructions:
 {rules}
+{retry_context}
 """
         self._invoke(
             repository, workspace, environment, "workspace-write", prompt
@@ -228,3 +230,35 @@ Return only JSON after editing:
         if not result.stdout.strip() and sandbox == "read-only":
             raise FixAgentError("Codex validation produced no output")
         return result.stdout
+
+
+def _retry_context(job: Job) -> str:
+    if job.attempts <= 1 or not job.last_error:
+        return ""
+    failed_tests: list[str] = []
+    try:
+        tests = json.loads(job.tests_json)
+    except json.JSONDecodeError:
+        tests = []
+    if isinstance(tests, list):
+        for test in tests:
+            if not isinstance(test, dict) or test.get("returncode") == 0:
+                continue
+            command = " ".join(str(part) for part in test.get("command", []))
+            output = str(test.get("stderr") or test.get("stdout") or "no output")
+            failed_tests.append(
+                f"- {command} (exit {test.get('returncode')}): {output[-2_000:]}"
+            )
+    test_context = "\n".join(failed_tests) or "- No recorded harness result."
+    return f"""
+
+This is retry attempt {job.attempts}. The previous attempt was discarded after
+it failed, so reproduce the fix from the clean current worktree and address the
+recorded failure. Do not hide, skip, or weaken repository checks.
+
+Previous failure:
+{job.last_error[-4_000:]}
+
+Previously failing harness commands:
+{test_context[:6_000]}
+"""

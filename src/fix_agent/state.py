@@ -28,6 +28,7 @@ class Job:
     status: str
     attempts: int
     last_error: str | None
+    next_attempt_at: str | None
     precheck_status: str | None
     precheck_reason: str | None
     postcheck_status: str | None
@@ -99,6 +100,7 @@ class StateStore:
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                next_attempt_at TEXT,
                 precheck_status TEXT,
                 precheck_reason TEXT,
                 postcheck_status TEXT,
@@ -155,6 +157,7 @@ class StateStore:
             ("postcheck_status", "TEXT"),
             ("postcheck_reason", "TEXT"),
             ("tests_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("next_attempt_at", "TEXT"),
         ):
             if name not in columns:
                 self.connection.execute(
@@ -393,6 +396,7 @@ class StateStore:
 
     def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
         limits = {repository.id: repository.max_attempts for repository in repositories}
+        now = _now()
         with self.connection:
             rows = self.connection.execute(
                 """
@@ -406,17 +410,22 @@ class StateStore:
                     value
                     for value in rows
                     if value["repository_id"] in limits
-                    and value["attempts"] < limits[value["repository_id"]]
+                    and (
+                        limits[value["repository_id"]] == 0
+                        or value["attempts"] < limits[value["repository_id"]]
+                    )
                 ),
                 None,
             )
             if row is None:
                 return None
+            if row["next_attempt_at"] is not None and row["next_attempt_at"] > now:
+                return None
             cursor = self.connection.execute(
                 """
                 UPDATE jobs
                 SET status = 'validating', attempts = attempts + 1,
-                    last_error = NULL, updated_at = ?
+                    next_attempt_at = NULL, updated_at = ?
                 WHERE id = ? AND status IN ('queued', 'failed')
                 """,
                 (_now(), row["id"]),
@@ -461,10 +470,30 @@ class StateStore:
         self._update(job_id, "pushed", fix_branch=branch, result_commit=commit)
 
     def mark_completed(self, job_id: int, pr_url: str | None) -> None:
-        self._update(job_id, "completed", pr_url=pr_url)
+        self._update(
+            job_id,
+            "completed",
+            pr_url=pr_url,
+            last_error=None,
+            next_attempt_at=None,
+        )
 
-    def mark_failed(self, job_id: int, error: str) -> None:
-        self._update(job_id, "failed", last_error=error[:20_000])
+    def mark_failed(
+        self, job_id: int, error: str, retry_after_seconds: int | None = None
+    ) -> str | None:
+        next_attempt_at = None
+        if retry_after_seconds is not None:
+            next_attempt_at = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=retry_after_seconds)
+            ).isoformat()
+        self._update(
+            job_id,
+            "failed",
+            last_error=error[:20_000],
+            next_attempt_at=next_attempt_at,
+        )
+        return next_attempt_at
 
     def _update(self, job_id: int, status: str, **values: object) -> None:
         assignments = ["status = ?", "updated_at = ?"]
@@ -472,6 +501,7 @@ class StateStore:
         for key, value in values.items():
             if key not in {
                 "last_error",
+                "next_attempt_at",
                 "precheck_status",
                 "precheck_reason",
                 "postcheck_status",

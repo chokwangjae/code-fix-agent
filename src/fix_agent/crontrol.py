@@ -61,15 +61,25 @@ class CrontrolReporter:
         current = next((job for job in jobs if job.id == current_job_id), None)
         if current_job_id is not None and current is None:
             raise FixAgentError(f"job does not exist: {current_job_id}")
-        queued = sum(job.status == "queued" for job in jobs)
+        retryable = {
+            job.id
+            for job in jobs
+            if job.status == "failed" and self._retryable(job)
+        }
+        queued = sum(job.status == "queued" or job.id in retryable for job in jobs)
         latest_terminal = next(
-            (job for job in jobs if job.status in _TERMINAL_STATUSES), None
+            (
+                job
+                for job in jobs
+                if job.status in _TERMINAL_STATUSES and job.id not in retryable
+            ),
+            None,
         )
         running = current is not None and current.status in _RUNNING_STATUSES
         result = "FAIL" if latest_terminal and latest_terminal.status == "failed" else "PASS"
         current_stage = "idle"
         if current is not None:
-            current_stage = _display(stage or _status_stage(current.status), 120)
+            current_stage = _display(stage or self._job_stage(current), 120)
         schedule = self._schedule(current, stage, queued)
         branch = current.branch if current is not None else self.settings.branch
         payload: dict[str, object] = {
@@ -98,8 +108,17 @@ class CrontrolReporter:
         if current is None:
             return f"유휴 · 대기 {queued}건"
         repository = current.repository.rsplit("/", 1)[-1]
-        current_stage = _display(stage or _status_stage(current.status), 120)
+        current_stage = _display(stage or self._job_stage(current), 120)
         return f"{repository} #{current.id} · {current_stage} · 대기 {queued}건"
+
+    def _retryable(self, job: Job) -> bool:
+        repository = self.config.repository_by_id(job.repository_id)
+        return repository.max_attempts == 0 or job.attempts < repository.max_attempts
+
+    def _job_stage(self, job: Job) -> str:
+        if job.status == "failed" and self._retryable(job):
+            return "재시도 대기"
+        return _status_stage(job.status)
 
     def _send(self, payload: dict[str, object]) -> None:
         job_url = (

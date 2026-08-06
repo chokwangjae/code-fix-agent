@@ -53,12 +53,18 @@ class DiscordPayloadTest(unittest.TestCase):
         progress = replace(event(), event_type="diff_validated", status="fixing")
         self.assertEqual(discord_event_payloads(job(), progress), ())
 
+    def test_retryable_failure_uses_retry_event_instead_of_final_failure(self) -> None:
+        retrying = job(next_attempt_at="2026-08-05T00:01:00+00:00")
+        failed = event(event_type="status_changed", status="failed")
+        self.assertEqual(discord_event_payloads(retrying, failed), ())
+
     def test_formats_validation_and_fix_milestones(self) -> None:
         expected = {
             "finding_validation_started": "🔎 코드 수정 finding 검증 시작",
             "finding_validation_completed": "✅ 코드 수정 finding 검증 완료",
             "fix_started": "🛠️ 코드 수정 시작",
-            "fix_applied": "✅ 코드 수정 적용 완료",
+            "fix_applied": "🛠️ 코드 수정안 생성 완료",
+            "retry_scheduled": "🔄 코드 수정 재시도 예정",
         }
         for event_type, title in expected.items():
             with self.subTest(event_type=event_type):

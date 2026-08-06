@@ -16,6 +16,7 @@ _NOTIFIABLE_EVENTS = {
     "finding_validation_completed",
     "fix_started",
     "fix_applied",
+    "retry_scheduled",
     "target_moved",
     "merge_conflict_detected",
     "merge_conflict_resolved",
@@ -29,7 +30,7 @@ def discord_event_payloads(
 ) -> tuple[dict[str, Any], ...]:
     """Format a durable job event without performing any network request."""
 
-    if not _is_notifiable(event):
+    if not _is_notifiable(job, event):
         return ()
     title, color = _presentation(event)
     details = json.loads(event.details_json)
@@ -65,10 +66,13 @@ def discord_event_payloads(
     return (_payload([embed]),)
 
 
-def _is_notifiable(event: JobEvent) -> bool:
+def _is_notifiable(job: Job, event: JobEvent) -> bool:
     return event.event_type in _NOTIFIABLE_EVENTS or (
         event.event_type == "status_changed"
-        and event.status in {"completed", "rejected", "failed"}
+        and (
+            event.status in {"completed", "rejected"}
+            or (event.status == "failed" and job.next_attempt_at is None)
+        )
     ) or (
         event.event_type == "job_created" and event.status == "skipped"
     )
@@ -82,7 +86,9 @@ def _presentation(event: JobEvent) -> tuple[str, int]:
     if event.event_type == "fix_started":
         return "🛠️ 코드 수정 시작", INFO_COLOR
     if event.event_type == "fix_applied":
-        return "✅ 코드 수정 적용 완료", PASS_COLOR
+        return "🛠️ 코드 수정안 생성 완료", INFO_COLOR
+    if event.event_type == "retry_scheduled":
+        return "🔄 코드 수정 재시도 예정", WARNING_COLOR
     if event.event_type == "target_moved":
         return "🔄 코드 수정 target 변경 감지", INFO_COLOR
     if event.event_type == "merge_conflict_detected":

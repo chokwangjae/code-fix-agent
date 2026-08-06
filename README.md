@@ -49,6 +49,7 @@ curl http://127.0.0.1:7081/health
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
 - finding별 최신 target 기반 detached worktree, 원격 이동 시 merge·재검증
+- 이전 실패 원인과 하네스 출력을 반영한 순차 재시도, push·worktree 정리 뒤 완료 처리
 - append-only 작업 event 기록과 Discord notifier용 순차 event ID
 - `code-review-agent` 규격 호환 저장소별 Discord 알림, 검증·수정 단계 통지와 실패 재시도
 - Crontrol에 현재 repository, job ID, 처리 단계와 대기 건수 자동 동기화
@@ -93,6 +94,16 @@ curl http://127.0.0.1:7070/api/v1/jobs
 `[crontrol]` 설정을 바꾼 뒤에는 `serve` 또는 LaunchAgent를 재시작해야 자동 단계 동기화에 반영된다.
 
 자동 트리거는 인증된 `POST /reviews` 요청으로 연결한다. 같은 장비에서 수동으로 전달할 때는 `fix-agent submit`을 사용할 수 있다.
+
+severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. `retry_delay_seconds`가 지난 뒤 같은 job을 다시 처리하며, 이 job이 끝나기 전에는 뒤 job을 시작하지 않는다. 다음 시도는 기존 사실 판정과 사유를 유지하고 최신 `remote/target_branch`로 새 worktree를 만든다. 직전 `last_error`와 실패한 하네스 출력도 Codex에 전달한다. `completed`는 push와 worktree 제거가 모두 끝난 상태다.
+
+```toml
+[repositories.execution]
+command_timeout_seconds = 3600
+max_attempts = 0
+retry_delay_seconds = 30
+max_remote_merge_attempts = 3
+```
 
 ## 문서
 

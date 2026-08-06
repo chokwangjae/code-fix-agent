@@ -37,6 +37,49 @@ class StateTest(unittest.TestCase):
         self.assertIn("duplicate_received", [item.event_type for item in events])
         self.assertEqual(sorted(item.id for item in events), [item.id for item in events])
 
+    def test_unlimited_job_retries_with_previous_failure_context(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'test_commands = []',
+                    'test_commands = []\n[repositories.execution]\nmax_attempts = 0',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            parsed = parse_review_event(event())
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parsed)
+                first = state.claim_next(config.repositories)
+                state.mark_failed(first.id, "harness failed", 0)
+                second = state.claim_next(config.repositories)
+        self.assertEqual(second.id, first.id)
+        self.assertEqual(second.attempts, 2)
+        self.assertEqual(second.last_error, "harness failed")
+        self.assertIsNone(second.next_attempt_at)
+
+    def test_retry_delay_blocks_the_oldest_job(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'test_commands = []',
+                    'test_commands = []\n[repositories.execution]\nmax_attempts = 0',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            parsed = parse_review_event(event())
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parsed)
+                first = state.claim_next(config.repositories)
+                state.mark_failed(first.id, "temporary failure", 3600)
+                claimed = state.claim_next(config.repositories)
+        self.assertIsNone(claimed)
+
     @staticmethod
     def _config() -> str:
         return """

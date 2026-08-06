@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import threading
 
-from .codex_agent import CodexAgent
+from .codex_agent import CodexAgent, Decision
 from .command import CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .crontrol import CrontrolReporter
@@ -14,7 +14,7 @@ from .credentials import resolve_github_credential
 from .errors import FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
-from .workspace import FixWorkspace
+from .workspace import FixWorkspace, reconcile_recorded_worktree
 
 
 _CRONTROL_EVENT_STAGES = {
@@ -23,7 +23,8 @@ _CRONTROL_EVENT_STAGES = {
     "finding_validation_started": "finding 검증 중",
     "finding_validation_completed": "finding 검증 완료",
     "fix_started": "수정 중",
-    "fix_applied": "수정 적용 완료",
+    "fix_applied": "수정안 생성 완료",
+    "retry_scheduled": "재시도 대기",
     "diff_validated": "변경 정책 검증 완료",
     "tests_started": "테스트 중",
     "result_validation_started": "수정 결과 검증 중",
@@ -68,8 +69,31 @@ class FixWorker:
         try:
             self._process(job)
         except Exception as exc:
+            repository = self.config.repository_by_id(job.repository_id)
+            retryable = (
+                repository.max_attempts == 0
+                or job.attempts < repository.max_attempts
+            )
             with StateStore(self.config.state_dir) as state:
-                state.mark_failed(job.id, str(exc))
+                next_attempt_at = state.mark_failed(
+                    job.id,
+                    str(exc),
+                    repository.retry_delay_seconds if retryable else None,
+                )
+                if next_attempt_at is not None:
+                    state.record_event(
+                        job.id,
+                        "retry_scheduled",
+                        "failed attempt will be retried before later jobs",
+                        {
+                            "attempt": job.attempts,
+                            "max_attempts": repository.max_attempts,
+                            "next_attempt_at": next_attempt_at,
+                            "error": str(exc)[:4_000],
+                        },
+                    )
+            if next_attempt_at is not None:
+                self.crontrol.sync(job.id, "재시도 대기")
             print(f"job {job.id} failed: {exc}")
         finally:
             self.crontrol.sync(job.id)
@@ -116,14 +140,36 @@ class FixWorker:
                         if event.event_type
                         in {"worktree_removed", "worktree_cleanup_incomplete"}
                     ]
-                    if (
-                        not cleanup_events
-                        or cleanup_events[-1].event_type != "worktree_removed"
+                    worktree_events = [
+                        event
+                        for event in state.events(job.id)
+                        if event.event_type == "worktree_created"
+                    ]
+                if (
+                    not cleanup_events
+                    or cleanup_events[-1].event_type != "worktree_removed"
+                ):
+                    if not worktree_events:
+                        raise FixAgentError(
+                            "pushed job has no recorded worktree path for cleanup"
+                        )
+                    details = json.loads(worktree_events[-1].details_json)
+                    path = details.get("path") if isinstance(details, dict) else None
+                    if not isinstance(path, str) or not path:
+                        raise FixAgentError(
+                            "pushed job has an invalid recorded worktree path"
+                        )
+                    if not reconcile_recorded_worktree(
+                        self.runner,
+                        repository,
+                        self.config.state_dir,
+                        job.id,
+                        path,
                     ):
                         raise FixAgentError(
-                            "direct push succeeded but worktree cleanup requires "
-                            "manual reconciliation"
+                            "direct push succeeded but worktree cleanup is incomplete"
                         )
+                with StateStore(self.config.state_dir) as state:
                     state.mark_completed(job.id, None)
                 return
             pr_url = self._publish_pull_request(repository, job, job.fix_branch)
@@ -147,28 +193,41 @@ class FixWorker:
                 "finding commit, file, and reviewed line matched the review diff",
                 {"reviewed_target": job.target_commit},
             )
-            self._event(
-                job.id,
-                "finding_validation_started",
-                "Codex started independent finding validation",
-                {"workspace_base": workspace.base_commit},
-                notify=True,
-            )
-            decision = self.agent.validate_finding(
-                repository, job, workspace.path, environment, workspace.base_commit
-            )
-            with StateStore(self.config.state_dir) as state:
-                state.record_precheck(job.id, decision.valid, decision.reason)
-            self._event(
-                job.id,
-                "finding_validation_completed",
-                "Codex completed independent finding validation",
-                {"valid": decision.valid, "reason": decision.reason},
-                notify=True,
-            )
-            if not decision.valid:
-                print(f"job {job.id} rejected: {decision.reason}")
-                return
+            if job.precheck_status == "valid" and job.precheck_reason:
+                decision = Decision(True, job.precheck_reason)
+                self._event(
+                    job.id,
+                    "finding_validation_reused",
+                    "previous valid finding decision was retained for the retry",
+                    {"reason": decision.reason, "attempt": job.attempts},
+                )
+            else:
+                self._event(
+                    job.id,
+                    "finding_validation_started",
+                    "Codex started independent finding validation",
+                    {"workspace_base": workspace.base_commit},
+                    notify=True,
+                )
+                decision = self.agent.validate_finding(
+                    repository,
+                    job,
+                    workspace.path,
+                    environment,
+                    workspace.base_commit,
+                )
+                with StateStore(self.config.state_dir) as state:
+                    state.record_precheck(job.id, decision.valid, decision.reason)
+                self._event(
+                    job.id,
+                    "finding_validation_completed",
+                    "Codex completed independent finding validation",
+                    {"valid": decision.valid, "reason": decision.reason},
+                    notify=True,
+                )
+                if not decision.valid:
+                    print(f"job {job.id} rejected: {decision.reason}")
+                    return
 
             self._event(
                 job.id,
@@ -212,7 +271,7 @@ class FixWorker:
                 state.record_tests(job.id, tests)
             failed = [test for test in tests if test["returncode"] != 0]
             if failed:
-                raise FixAgentError("configured test command failed")
+                raise FixAgentError(_test_failure_error(failed))
             self._event(
                 job.id,
                 "result_validation_started",
@@ -231,8 +290,10 @@ class FixWorker:
                 {"valid": postcheck.valid, "reason": postcheck.reason},
             )
             if not postcheck.valid:
-                print(f"job {job.id} fix rejected: {postcheck.reason}")
-                return
+                raise FixAgentError(
+                    "completed fix did not pass independent validation: "
+                    + postcheck.reason
+                )
             workspace.validate_diff()
             branch, commit = workspace.commit()
             self._event(
@@ -327,7 +388,7 @@ class FixWorker:
                     failed = [test for test in tests if test["returncode"] != 0]
                     if failed:
                         raise FixAgentError(
-                            "configured test command failed after target merge"
+                            _test_failure_error(failed, after_target_merge=True)
                         )
                     workspace.require_clean_checkout()
                     postcheck = self.agent.validate_fix(
@@ -342,10 +403,10 @@ class FixWorker:
                             job.id, postcheck.valid, postcheck.reason
                         )
                     if not postcheck.valid:
-                        print(
-                            f"job {job.id} merged fix rejected: {postcheck.reason}"
+                        raise FixAgentError(
+                            "merged fix did not pass independent validation: "
+                            + postcheck.reason
                         )
-                        return
                     commit = workspace.head_commit()
                     self._event(
                         job.id,
@@ -586,3 +647,17 @@ class FixWorker:
         if resolved is None:  # pragma: no cover - required resolver contract
             raise FixAgentError("GitHub authentication is unavailable")
         return resolved
+
+
+def _test_failure_error(
+    failed: list[dict[str, object]], *, after_target_merge: bool = False
+) -> str:
+    phase = " after target merge" if after_target_merge else ""
+    lines = [f"configured test command failed{phase}:"]
+    for test in failed:
+        command = " ".join(str(part) for part in test.get("command", []))
+        output = str(test.get("stderr") or test.get("stdout") or "no output").strip()
+        lines.append(
+            f"- {command} (exit {test.get('returncode')}): {output[-2_000:]}"
+        )
+    return "\n".join(lines)[:10_000]

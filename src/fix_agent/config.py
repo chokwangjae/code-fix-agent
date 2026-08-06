@@ -101,6 +101,7 @@ class RepositoryConfig:
     commit_message_template: str
     command_timeout_seconds: int
     max_attempts: int
+    retry_delay_seconds: int
     max_remote_merge_attempts: int
     policy: RepositoryPolicy
 
@@ -297,8 +298,12 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
             execution.get("command_timeout_seconds", 1800),
             f"{context}.execution.command_timeout_seconds",
         ),
-        max_attempts=_positive_integer(
+        max_attempts=_nonnegative_integer(
             execution.get("max_attempts", 1), f"{context}.execution.max_attempts"
+        ),
+        retry_delay_seconds=_nonnegative_integer(
+            execution.get("retry_delay_seconds", 60),
+            f"{context}.execution.retry_delay_seconds",
         ),
         max_remote_merge_attempts=_positive_integer(
             execution.get("max_remote_merge_attempts", 3),
@@ -496,6 +501,12 @@ def _positive_integer(raw: Any, context: str, *, maximum: int | None = None) -> 
         raise FixAgentError(f"{context} must be a positive integer")
     if maximum is not None and raw > maximum:
         raise FixAgentError(f"{context} must not exceed {maximum}")
+    return raw
+
+
+def _nonnegative_integer(raw: Any, context: str) -> int:
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+        raise FixAgentError(f"{context} must be a non-negative integer")
     return raw
 
 
