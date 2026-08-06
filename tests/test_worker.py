@@ -104,6 +104,15 @@ class LocalDirectPushWorker(LocalWorker):
         )
 
 
+class RecordingCrontrol:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def sync(self, current_job_id, stage=None):
+        self.calls.append((current_job_id, stage))
+        return True
+
+
 class WorkerTest(unittest.TestCase):
     def test_records_both_decisions_and_completes_job(self) -> None:
         with TemporaryDirectory() as directory:
@@ -111,7 +120,10 @@ class WorkerTest(unittest.TestCase):
             repository_path, baseline, target = WorkspaceTest._repository(root)
             config = WorkspaceTest._config(root, repository_path)
             self._queue(config, baseline, target)
-            worker = LocalWorker(config, CommandRunner(), FakeAgent())
+            crontrol = RecordingCrontrol()
+            worker = LocalWorker(
+                config, CommandRunner(), FakeAgent(), crontrol=crontrol
+            )
             self.assertTrue(worker.run_once())
             with StateStore(config.state_dir) as state:
                 completed = state.jobs()[0]
@@ -129,6 +141,12 @@ class WorkerTest(unittest.TestCase):
         self.assertLess(
             event_types.index("fix_started"), event_types.index("fix_applied")
         )
+        stages = [stage for _, stage in crontrol.calls if stage]
+        self.assertIn("finding 검증 중", stages)
+        self.assertIn("수정 중", stages)
+        self.assertIn("테스트 중", stages)
+        self.assertIn("push 중", stages)
+        self.assertEqual(crontrol.calls[-1], (None, None))
 
     def test_rejects_false_finding_without_editing(self) -> None:
         with TemporaryDirectory() as directory:

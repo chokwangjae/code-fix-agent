@@ -19,6 +19,7 @@ class LaunchdTest(unittest.TestCase):
                     "FIX_TOKEN": "intake",
                     "FIX_GITHUB_TOKEN": "github",
                     "FIX_DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
+                    "CRONTROL_API_TOKEN": "crontrol",
                 },
                 clear=True,
             ):
@@ -37,6 +38,7 @@ class LaunchdTest(unittest.TestCase):
             environment["FIX_DISCORD_WEBHOOK_URL"],
             "https://discord.example/webhook",
         )
+        self.assertEqual(environment["CRONTROL_API_TOKEN"], "crontrol")
 
     def test_requires_all_configured_tokens(self) -> None:
         with TemporaryDirectory() as directory:
@@ -44,7 +46,7 @@ class LaunchdTest(unittest.TestCase):
             with patch.dict("os.environ", {}, clear=True):
                 with self.assertRaisesRegex(
                     FixAgentError,
-                    "FIX_DISCORD_WEBHOOK_URL|FIX_GITHUB_TOKEN|FIX_TOKEN",
+                    "CRONTROL_API_TOKEN|FIX_DISCORD_WEBHOOK_URL|FIX_GITHUB_TOKEN|FIX_TOKEN",
                 ):
                     launchd_environment(config)
 
@@ -73,6 +75,7 @@ class LaunchdTest(unittest.TestCase):
             values = {
                 "FIX_TOKEN": "intake",
                 "FIX_DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
+                "CRONTROL_API_TOKEN": "crontrol",
             }
             with patch.dict("os.environ", values, clear=True):
                 environment = launchd_environment(config)
@@ -91,6 +94,9 @@ version = 1
 state_dir = ".state"
 [server]
 token_env = "FIX_TOKEN"
+[crontrol]
+enabled = true
+token_env = "CRONTROL_API_TOKEN"
 [[repositories]]
 id = "repo"
 github = "owner/repo"

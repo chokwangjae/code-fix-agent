@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 
 from .config import load_config
+from .crontrol import CrontrolReporter
 from .errors import FixAgentError
 from .notify import DiscordNotifier
 from .server import IntakeApplication, serve
@@ -53,6 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
     notify_parser.add_argument(
         "--force", action="store_true", help="ignore the stored retry delay"
     )
+
+    crontrol_parser = subparsers.add_parser(
+        "crontrol-once", help="synchronize the current fix stage to Crontrol"
+    )
+    crontrol_parser.add_argument("--config", required=True, type=Path)
+    crontrol_parser.add_argument("--job-id", type=int)
+    crontrol_parser.add_argument("--stage")
     return parser
 
 
@@ -87,6 +95,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(asdict(result), ensure_ascii=False))
             return 1 if result.failed else 0
+        if args.command == "crontrol-once":
+            if args.job_id is not None and args.job_id < 1:
+                raise FixAgentError("--job-id must be a positive integer")
+            if args.stage and args.job_id is None:
+                raise FixAgentError("--stage requires --job-id")
+            reporter = CrontrolReporter(config)
+            sent = reporter.sync(args.job_id, args.stage)
+            if reporter.last_error:
+                return 1
+            print("Crontrol status synchronized" if sent else "Crontrol status unchanged")
+            return 0
         if args.command == "events":
             if args.job_id is not None and args.job_id < 1:
                 raise FixAgentError("--job-id must be a positive integer")

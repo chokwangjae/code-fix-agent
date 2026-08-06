@@ -14,6 +14,7 @@ class ConfigTest(unittest.TestCase):
             config = load_config(path)
         repository = config.repositories[0]
         self.assertEqual(config.server.port, 7081)
+        self.assertFalse(config.crontrol.enabled)
         self.assertEqual(repository.target_branch, "main")
         self.assertEqual(repository.publish_mode, "direct")
         self.assertEqual(repository.max_remote_merge_attempts, 4)
@@ -120,6 +121,30 @@ class ConfigTest(unittest.TestCase):
             path.write_text(value, encoding="utf-8")
             with self.assertRaisesRegex(FixAgentError, "token or token_env"):
                 load_config(path)
+
+    def test_loads_crontrol_status_sync(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                "[server]\ntoken_env = \"FIX_TOKEN\"",
+                "[server]\ntoken_env = \"FIX_TOKEN\"\n"
+                "[crontrol]\n"
+                "enabled = true\n"
+                "base_url = \"http://127.0.0.1:7070\"\n"
+                "job_id = \"code-fix-agent-server\"\n"
+                "name = \"Code Fix Agent\"\n"
+                "branch = \"main\"\n"
+                "token = \"crontrol-secret\"\n"
+                "timeout_seconds = 7",
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+        self.assertTrue(config.crontrol.enabled)
+        self.assertEqual(config.crontrol.name, "Code Fix Agent")
+        self.assertEqual(config.crontrol.token, "crontrol-secret")
+        self.assertIsNone(config.crontrol.token_env)
+        self.assertEqual(config.crontrol.timeout_seconds, 7)
+        self.assertNotIn("crontrol-secret", repr(config))
 
     def test_rejects_two_github_token_sources(self) -> None:
         with TemporaryDirectory() as directory:

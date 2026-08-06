@@ -51,6 +51,7 @@ curl http://127.0.0.1:7081/health
 - finding별 최신 target 기반 detached worktree, 원격 이동 시 merge·재검증
 - append-only 작업 event 기록과 Discord notifier용 순차 event ID
 - `code-review-agent` 규격 호환 저장소별 Discord 알림, 검증·수정 단계 통지와 실패 재시도
+- Crontrol에 현재 repository, job ID, 처리 단계와 대기 건수 자동 동기화
 
 Discord 알림은 `fix-agent.toml`의 저장소별 `[repositories.discord]`에서 켠다. 현재 기본 설정은 실제 발송을 막기 위해 `enabled = false`다. `true`로 바꾼 뒤 `webhook_url_env`에 적힌 환경 변수에 웹훅 URL을 넣으면 `serve`와 `run-once`가 작업 이벤트를 전송한다. 수동 전송·재시도는 다음 명령으로 확인한다.
 
@@ -70,7 +71,28 @@ timeout_seconds = 30
 .venv/bin/fix-agent notify-once --config fix-agent.toml --force
 ```
 
-현재 `code-review-agent`와 자동 트리거는 연결하지 않았다. 승인 없이 사용할 수 있는 입력 방식은 HTTP API와 `fix-agent submit`이다.
+Crontrol 연동은 전역 `[crontrol]`에서 설정한다. 활성화하면 같은 ID의 `Code Fix Agent` 행에 현재 단계를 자동 반영한다. 로컬 Crontrol에 API token이 없으면 `token`과 `token_env`를 모두 생략한다.
+
+```toml
+[crontrol]
+enabled = true
+base_url = "http://127.0.0.1:7070"
+job_id = "code-fix-agent-server"
+name = "Code Fix Agent"
+branch = "main"
+timeout_seconds = 5
+```
+
+수동 동기화와 현재 등록값 확인은 다음 명령을 사용한다.
+
+```bash
+.venv/bin/fix-agent crontrol-once --config fix-agent.toml
+curl http://127.0.0.1:7070/api/v1/jobs
+```
+
+`[crontrol]` 설정을 바꾼 뒤에는 `serve` 또는 LaunchAgent를 재시작해야 자동 단계 동기화에 반영된다.
+
+자동 트리거는 인증된 `POST /reviews` 요청으로 연결한다. 같은 장비에서 수동으로 전달할 때는 `fix-agent submit`을 사용할 수 있다.
 
 ## 문서
 

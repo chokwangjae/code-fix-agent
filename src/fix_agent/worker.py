@@ -9,11 +9,34 @@ import threading
 from .codex_agent import CodexAgent
 from .command import CommandRunner
 from .config import AppConfig, RepositoryConfig
+from .crontrol import CrontrolReporter
 from .credentials import resolve_github_credential
 from .errors import FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
 from .workspace import FixWorkspace
+
+
+_CRONTROL_EVENT_STAGES = {
+    "processing_started": "작업 준비",
+    "finding_git_validated": "Git 검증 완료",
+    "finding_validation_started": "finding 검증 중",
+    "finding_validation_completed": "finding 검증 완료",
+    "fix_started": "수정 중",
+    "fix_applied": "수정 적용 완료",
+    "diff_validated": "변경 정책 검증 완료",
+    "tests_started": "테스트 중",
+    "result_validation_started": "수정 결과 검증 중",
+    "result_validation_completed": "수정 결과 검증 완료",
+    "fix_committed": "커밋 완료",
+    "target_moved": "원격 target 병합 중",
+    "merge_conflict_detected": "merge 충돌 해결 중",
+    "merge_conflict_resolved": "merge 충돌 해결 완료",
+    "target_merged": "원격 target 병합 완료",
+    "merged_fix_revalidated": "병합 결과 재검증 완료",
+    "push_started": "push 중",
+    "push_completed": "push 완료",
+}
 
 
 class FixWorker:
@@ -22,27 +45,37 @@ class FixWorker:
         config: AppConfig,
         runner: CommandRunner | None = None,
         agent: CodexAgent | None = None,
+        crontrol: CrontrolReporter | None = None,
     ) -> None:
         self.config = config
         self.runner = runner or CommandRunner()
         self.agent = agent or CodexAgent(self.runner, config.codex_executable)
         self.notifier = DiscordNotifier(config)
+        self.crontrol = crontrol or CrontrolReporter(config)
         self.notifier.initialize_cursors()
         self._stop = threading.Event()
+        self._current_job_id: int | None = None
 
     def run_once(self) -> bool:
         with StateStore(self.config.state_dir) as state:
             job = state.claim_next(self.config.repositories)
         if job is None:
+            self.crontrol.sync(None)
             self._dispatch_notifications()
             return False
+        self._current_job_id = job.id
+        self.crontrol.sync(job.id, "작업 준비")
         try:
             self._process(job)
         except Exception as exc:
             with StateStore(self.config.state_dir) as state:
                 state.mark_failed(job.id, str(exc))
             print(f"job {job.id} failed: {exc}")
-        self._dispatch_notifications()
+        finally:
+            self.crontrol.sync(job.id)
+            self._dispatch_notifications()
+            self._current_job_id = None
+            self.crontrol.sync(None)
         return True
 
     def run_forever(self, poll_seconds: float = 2.0) -> None:
@@ -168,17 +201,35 @@ class FixWorker:
             workspace.stage_for_harness()
             with StateStore(self.config.state_dir) as state:
                 state.mark_testing(job.id)
+            self._event(
+                job.id,
+                "tests_started",
+                "configured repository harness started",
+                {"commands": len(repository.test_commands)},
+            )
             tests = self._run_tests(repository, workspace.path, environment)
             with StateStore(self.config.state_dir) as state:
                 state.record_tests(job.id, tests)
             failed = [test for test in tests if test["returncode"] != 0]
             if failed:
                 raise FixAgentError("configured test command failed")
+            self._event(
+                job.id,
+                "result_validation_started",
+                "Codex started validating the completed fix",
+                {"workspace_base": workspace.base_commit},
+            )
             postcheck = self.agent.validate_fix(
                 repository, job, workspace.path, environment, workspace.base_commit
             )
             with StateStore(self.config.state_dir) as state:
                 state.record_postcheck(job.id, postcheck.valid, postcheck.reason)
+            self._event(
+                job.id,
+                "result_validation_completed",
+                "Codex completed validation of the fix result",
+                {"valid": postcheck.valid, "reason": postcheck.reason},
+            )
             if not postcheck.valid:
                 print(f"job {job.id} fix rejected: {postcheck.reason}")
                 return
@@ -388,6 +439,9 @@ class FixWorker:
     ) -> None:
         with StateStore(self.config.state_dir) as state:
             state.record_event(job_id, event_type, message, details)
+        stage = _CRONTROL_EVENT_STAGES.get(event_type)
+        if stage is not None:
+            self.crontrol.sync(job_id, stage)
         if notify:
             self._dispatch_notifications()
 

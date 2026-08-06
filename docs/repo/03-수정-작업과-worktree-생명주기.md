@@ -285,6 +285,8 @@ git -C /configured/local_path worktree list --porcelain
 
 `src/fix_agent/discord.py`는 `code-review-agent`의 Discord 형식에 맞춰 payload를 만들고 `src/fix_agent/notify.py`가 저장소별 웹훅으로 전송한다.
 
+같은 event 흐름은 `src/fix_agent/crontrol.py`가 Crontrol의 `Code Fix Agent` 행에 현재 repository, job ID, 단계와 대기 건수로 요약한다. Crontrol에는 finding 원문, 파일 경로, 판단 사유나 명령 출력을 보내지 않는다. 연결 실패는 로컬 로그에 남기고 작업 상태를 바꾸지 않는다.
+
 - embed payload와 `Content-Type: application/json` 전제
 - `username = "Code Fix Agent"`
 - `allowed_mentions = {"parse": []}`

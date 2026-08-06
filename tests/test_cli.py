@@ -64,6 +64,34 @@ class CliTest(unittest.TestCase):
             {"delivered": 0, "skipped": 0, "failed": 0, "deferred": 0},
         )
 
+    def test_crontrol_once_is_noop_when_disabled(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fix.toml"
+            config_path.write_text(StateTest._config(), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                result = main(["crontrol-once", "--config", str(config_path)])
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue().strip(), "Crontrol status unchanged")
+
+    def test_crontrol_stage_requires_job_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fix.toml"
+            config_path.write_text(StateTest._config(), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                result = main(
+                    [
+                        "crontrol-once",
+                        "--config",
+                        str(config_path),
+                        "--stage",
+                        "수정 중",
+                    ]
+                )
+        self.assertEqual(result, 1)
+        self.assertIn("--stage requires --job-id", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

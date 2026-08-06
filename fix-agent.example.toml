@@ -9,6 +9,16 @@ port = 7081
 token_env = "CODE_FIX_TOKEN"
 max_body_bytes = 1048576
 
+[crontrol]
+enabled = true
+base_url = "http://127.0.0.1:7070"
+job_id = "code-fix-agent-server"
+name = "Code Fix Agent"
+branch = "main"
+# token = "replace-with-crontrol-api-token"
+# token_env = "CRONTROL_API_TOKEN"
+timeout_seconds = 5
+
 [[repositories]]
 id = "matrix-mobile-v2"
 github = "inswave/Matrix_Mobile_V2"

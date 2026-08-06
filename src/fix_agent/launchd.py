@@ -21,6 +21,8 @@ def launchd_environment(config: AppConfig) -> dict[str, str]:
     required_names: set[str] = set()
     if config.server.token_env:
         required_names.add(config.server.token_env)
+    if config.crontrol.enabled and config.crontrol.token_env:
+        required_names.add(config.crontrol.token_env)
     optional_names = {
         repository.github_token_env
         for repository in config.repositories

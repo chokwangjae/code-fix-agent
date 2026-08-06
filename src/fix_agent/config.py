@@ -38,6 +38,18 @@ class DiscordConfig:
 
 
 @dataclass(frozen=True)
+class CrontrolConfig:
+    enabled: bool
+    base_url: str
+    job_id: str
+    name: str
+    branch: str
+    token: str | None = field(repr=False)
+    token_env: str | None
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
 class RepositoryPolicy:
     allowed_severities: tuple[str, ...]
     allowed_paths: tuple[str, ...]
@@ -104,6 +116,7 @@ class AppConfig:
     codex_executable: str | None
     server: ServerConfig
     repositories: tuple[RepositoryConfig, ...]
+    crontrol: CrontrolConfig
 
     def repository(self, github: str, branch: str) -> RepositoryConfig:
         for repository in self.repositories:
@@ -130,6 +143,7 @@ def load_config(path: Path) -> AppConfig:
     base = path.resolve().parent
     state_dir = _resolve_path(base, _required_string(raw, "state_dir"))
     server = _server(raw.get("server"))
+    crontrol = _crontrol(raw.get("crontrol"))
     codex_executable = raw.get("codex_executable")
     if codex_executable is not None and (
         not isinstance(codex_executable, str) or not codex_executable
@@ -150,7 +164,7 @@ def load_config(path: Path) -> AppConfig:
         raise FixAgentError("repository ids must be unique")
     if len(coordinates) != len(set(coordinates)):
         raise FixAgentError("repository and branch pairs must be unique")
-    return AppConfig(state_dir, codex_executable, server, repositories)
+    return AppConfig(state_dir, codex_executable, server, repositories, crontrol)
 
 
 def _server(raw: Any) -> ServerConfig:
@@ -165,6 +179,59 @@ def _server(raw: Any) -> ServerConfig:
     )
     token, token_env = _credential_source(raw, "token", "token_env", "server")
     return ServerConfig(host, port, token, token_env, max_body_bytes)
+
+
+def _crontrol(raw: Any) -> CrontrolConfig:
+    if raw is None:
+        return CrontrolConfig(
+            False,
+            "http://127.0.0.1:7070",
+            "code-fix-agent-server",
+            "Code Fix Agent",
+            "main",
+            None,
+            None,
+            5,
+        )
+    if not isinstance(raw, dict):
+        raise FixAgentError("crontrol must be a table")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise FixAgentError("crontrol.enabled must be a boolean")
+    base_url = raw.get("base_url", "http://127.0.0.1:7070")
+    if not isinstance(base_url, str):
+        raise FixAgentError("crontrol.base_url must be an HTTP URL")
+    parsed_url = urlsplit(base_url)
+    if (
+        parsed_url.scheme not in {"https", "http"}
+        or not parsed_url.netloc
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise FixAgentError("crontrol.base_url must be an HTTP URL")
+    token, token_env = _credential_source(
+        raw, "token", "token_env", "crontrol", required=False
+    )
+    return CrontrolConfig(
+        enabled,
+        base_url.rstrip("/"),
+        _required_string(
+            {"job_id": raw.get("job_id", "code-fix-agent-server")},
+            "job_id",
+            "crontrol",
+        ),
+        _required_string(
+            {"name": raw.get("name", "Code Fix Agent")}, "name", "crontrol"
+        ),
+        _required_string(
+            {"branch": raw.get("branch", "main")}, "branch", "crontrol"
+        ),
+        token,
+        token_env,
+        _positive_integer(
+            raw.get("timeout_seconds", 5), "crontrol.timeout_seconds"
+        ),
+    )
 
 
 def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
