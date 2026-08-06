@@ -348,6 +348,10 @@ retry_delay_seconds = 0
         self.assertIn(
             "finding_validation_reused", [event.event_type for event in events]
         )
+        reused = next(
+            event for event in events if event.event_type == "finding_validation_reused"
+        )
+        self.assertEqual(reused.status, "fixing")
         self.assertEqual(
             [event.event_type for event in events].count("worktree_removed"), 2
         )

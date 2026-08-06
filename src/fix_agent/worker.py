@@ -195,6 +195,8 @@ class FixWorker:
             )
             if job.precheck_status == "valid" and job.precheck_reason:
                 decision = Decision(True, job.precheck_reason)
+                with StateStore(self.config.state_dir) as state:
+                    state.record_precheck(job.id, True, decision.reason)
                 self._event(
                     job.id,
                     "finding_validation_reused",
