@@ -293,7 +293,7 @@ git -C /configured/local_path worktree list --porcelain
 - event ID, job ID, repository, branch, finding과 구조화 세부 정보 포함
 - embed 전체 약 5,500자 이내 제한
 
-기본 알림 후보는 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·`failed` 상태다. 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
+기본 알림 후보는 finding 검증 시작·완료, 수정 시작·적용 완료, 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·`failed` 상태다. 검증과 수정의 네 단계 알림은 해당 event 기록 직후 전송을 시도한다. 나머지 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
 
 sender는 `code-review-agent`와 같은 운영 규칙을 따른다.
 

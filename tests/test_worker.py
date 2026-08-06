@@ -115,10 +115,20 @@ class WorkerTest(unittest.TestCase):
             self.assertTrue(worker.run_once())
             with StateStore(config.state_dir) as state:
                 completed = state.jobs()[0]
+                event_types = [
+                    event.event_type for event in state.events(completed.id)
+                ]
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.precheck_status, "valid")
         self.assertEqual(completed.postcheck_status, "resolved")
         self.assertEqual(completed.pr_url, "https://github.com/owner/repo/pull/1")
+        self.assertLess(
+            event_types.index("finding_validation_started"),
+            event_types.index("finding_validation_completed"),
+        )
+        self.assertLess(
+            event_types.index("fix_started"), event_types.index("fix_applied")
+        )
 
     def test_rejects_false_finding_without_editing(self) -> None:
         with TemporaryDirectory() as directory:

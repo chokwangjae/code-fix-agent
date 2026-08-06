@@ -114,15 +114,36 @@ class FixWorker:
                 "finding commit, file, and reviewed line matched the review diff",
                 {"reviewed_target": job.target_commit},
             )
+            self._event(
+                job.id,
+                "finding_validation_started",
+                "Codex started independent finding validation",
+                {"workspace_base": workspace.base_commit},
+                notify=True,
+            )
             decision = self.agent.validate_finding(
                 repository, job, workspace.path, environment, workspace.base_commit
             )
             with StateStore(self.config.state_dir) as state:
                 state.record_precheck(job.id, decision.valid, decision.reason)
+            self._event(
+                job.id,
+                "finding_validation_completed",
+                "Codex completed independent finding validation",
+                {"valid": decision.valid, "reason": decision.reason},
+                notify=True,
+            )
             if not decision.valid:
                 print(f"job {job.id} rejected: {decision.reason}")
                 return
 
+            self._event(
+                job.id,
+                "fix_started",
+                "Codex started the workspace edit",
+                {"workspace_base": workspace.base_commit},
+                notify=True,
+            )
             self.agent.apply_fix(
                 repository, job, workspace.path, environment, workspace.base_commit
             )
@@ -131,6 +152,7 @@ class FixWorker:
                 "fix_applied",
                 "Codex finished the initial workspace edit",
                 {"workspace_base": workspace.base_commit},
+                notify=True,
             )
             summary = workspace.validate_diff()
             self._event(
@@ -361,9 +383,13 @@ class FixWorker:
         event_type: str,
         message: str,
         details: dict[str, object] | None = None,
+        *,
+        notify: bool = False,
     ) -> None:
         with StateStore(self.config.state_dir) as state:
             state.record_event(job_id, event_type, message, details)
+        if notify:
+            self._dispatch_notifications()
 
     def _run_tests(
         self,

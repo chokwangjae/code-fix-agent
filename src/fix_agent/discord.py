@@ -12,6 +12,10 @@ INFO_COLOR = 0x3498DB
 WARNING_COLOR = 0xE67E22
 
 _NOTIFIABLE_EVENTS = {
+    "finding_validation_started",
+    "finding_validation_completed",
+    "fix_started",
+    "fix_applied",
     "target_moved",
     "merge_conflict_detected",
     "merge_conflict_resolved",
@@ -71,6 +75,14 @@ def _is_notifiable(event: JobEvent) -> bool:
 
 
 def _presentation(event: JobEvent) -> tuple[str, int]:
+    if event.event_type == "finding_validation_started":
+        return "🔎 코드 수정 finding 검증 시작", INFO_COLOR
+    if event.event_type == "finding_validation_completed":
+        return "✅ 코드 수정 finding 검증 완료", PASS_COLOR
+    if event.event_type == "fix_started":
+        return "🛠️ 코드 수정 시작", INFO_COLOR
+    if event.event_type == "fix_applied":
+        return "✅ 코드 수정 적용 완료", PASS_COLOR
     if event.event_type == "target_moved":
         return "🔄 코드 수정 target 변경 감지", INFO_COLOR
     if event.event_type == "merge_conflict_detected":

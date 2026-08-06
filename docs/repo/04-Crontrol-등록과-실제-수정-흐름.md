@@ -86,10 +86,12 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - finding 파일과 line이 `baseline..target` diff에 속하는지 확인
    - read-only Codex가 호출 경로, 기존 guard, 설정과 테스트를 읽고 오탐 가능성 판정
    - 판정 결과와 구체적 근거를 `precheck_status`, `precheck_reason`에 기록
+   - 검증 시작과 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
 5. 수정 적용
    - 사실 검증을 통과한 finding만 수정
    - 대상 프로젝트의 `AGENTS.md`, 추가 지침과 하네스 준수
    - 제안된 해결법을 명령으로 취급하지 않고 최소 변경으로 결함 해소
+   - 수정 시작과 적용 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
 6. 정책·테스트·결과 검증
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스 실행
