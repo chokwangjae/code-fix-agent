@@ -86,6 +86,8 @@ class RetryAgent(FakeAgent):
         super().__init__()
         self.validation_calls = 0
         self.fix_calls = 0
+        self.workspaces = []
+        self.saw_existing_diff = False
 
     def validate_finding(
         self, repository, job, workspace, environment, workspace_base=None
@@ -97,8 +99,13 @@ class RetryAgent(FakeAgent):
 
     def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
         self.fix_calls += 1
-        if self.fix_calls > 1:
-            super().apply_fix(repository, job, workspace, environment, workspace_base)
+        self.workspaces.append(workspace)
+        target = workspace / job.file
+        if self.fix_calls == 1:
+            target.write_text("partial\n", encoding="utf-8")
+            return
+        self.saw_existing_diff = target.read_text(encoding="utf-8") == "partial\n"
+        super().apply_fix(repository, job, workspace, environment, workspace_base)
 
 
 class LocalWorker(FixWorker):
@@ -306,7 +313,7 @@ class WorkerTest(unittest.TestCase):
         )
         self.assertNotIn(target, created.details_json)
 
-    def test_validated_job_retries_before_later_jobs_until_completed(self) -> None:
+    def test_validated_job_retries_in_same_worktree_until_completed(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             repository_path, baseline, target = WorkspaceTest._repository(root)
@@ -324,7 +331,7 @@ target_branch = "main"
 local_path = "{repository_path}"
 publish_mode = "direct"
 github_token = "test-only-token"
-test_commands = []
+test_commands = [["sh", "-c", 'test "$(cat src/app.py)" = fixed']]
 [repositories.execution]
 max_attempts = 0
 retry_delay_seconds = 0
@@ -339,29 +346,23 @@ retry_delay_seconds = 0
 
             self.assertTrue(worker.run_once())
             with StateStore(config.state_dir) as state:
-                after_failure = state.jobs()
-            self.assertEqual(after_failure[1].status, "failed")
-            self.assertEqual(after_failure[0].status, "queued")
-
-            self.assertTrue(worker.run_once())
-            with StateStore(config.state_dir) as state:
                 jobs = state.jobs()
                 events = state.events(jobs[1].id)
 
         self.assertEqual(jobs[1].status, "completed")
-        self.assertEqual(jobs[1].attempts, 2)
+        self.assertEqual(jobs[1].attempts, 1)
         self.assertEqual(jobs[0].status, "queued")
         self.assertEqual(agent.validation_calls, 1)
-        self.assertIn("retry_scheduled", [event.event_type for event in events])
-        self.assertIn(
-            "finding_validation_reused", [event.event_type for event in events]
-        )
-        reused = next(
-            event for event in events if event.event_type == "finding_validation_reused"
-        )
-        self.assertEqual(reused.status, "fixing")
+        self.assertEqual(agent.fix_calls, 2)
+        self.assertTrue(agent.saw_existing_diff)
+        self.assertEqual(agent.workspaces[0], agent.workspaces[1])
+        self.assertIn("fix_iteration_failed", [event.event_type for event in events])
+        self.assertNotIn("retry_scheduled", [event.event_type for event in events])
         self.assertEqual(
-            [event.event_type for event in events].count("worktree_removed"), 2
+            [event.event_type for event in events].count("worktree_created"), 1
+        )
+        self.assertEqual(
+            [event.event_type for event in events].count("worktree_removed"), 1
         )
 
     @staticmethod

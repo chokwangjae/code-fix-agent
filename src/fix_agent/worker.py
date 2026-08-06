@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ from .credentials import resolve_github_credential
 from .errors import FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
-from .workspace import FixWorkspace, reconcile_recorded_worktree
+from .workspace import DiffSummary, FixWorkspace, reconcile_recorded_worktree
 
 
 _CRONTROL_EVENT_STAGES = {
@@ -24,6 +25,7 @@ _CRONTROL_EVENT_STAGES = {
     "finding_validation_completed": "finding 검증 완료",
     "fix_started": "수정 중",
     "fix_applied": "수정안 생성 완료",
+    "fix_iteration_failed": "검증 실패 보완 중",
     "retry_scheduled": "재시도 대기",
     "diff_validated": "변경 정책 검증 완료",
     "tests_started": "테스트 중",
@@ -47,11 +49,12 @@ class FixWorker:
         runner: CommandRunner | None = None,
         agent: CodexAgent | None = None,
         crontrol: CrontrolReporter | None = None,
+        notifier: DiscordNotifier | None = None,
     ) -> None:
         self.config = config
         self.runner = runner or CommandRunner()
         self.agent = agent or CodexAgent(self.runner, config.codex_executable)
-        self.notifier = DiscordNotifier(config)
+        self.notifier = notifier or DiscordNotifier(config)
         self.crontrol = crontrol or CrontrolReporter(config)
         self.notifier.initialize_cursors()
         self._stop = threading.Event()
@@ -231,72 +234,9 @@ class FixWorker:
                     print(f"job {job.id} rejected: {decision.reason}")
                     return
 
-            self._event(
-                job.id,
-                "fix_started",
-                "Codex started the workspace edit",
-                {"workspace_base": workspace.base_commit},
-                notify=True,
+            summary, tests, postcheck = self._fix_until_valid(
+                repository, job, workspace, environment
             )
-            self.agent.apply_fix(
-                repository, job, workspace.path, environment, workspace.base_commit
-            )
-            self._event(
-                job.id,
-                "fix_applied",
-                "Codex finished the initial workspace edit",
-                {"workspace_base": workspace.base_commit},
-                notify=True,
-            )
-            summary = workspace.validate_diff()
-            self._event(
-                job.id,
-                "diff_validated",
-                "initial diff passed repository policy",
-                {
-                    "files": list(summary.files),
-                    "added_lines": summary.added_lines,
-                    "deleted_lines": summary.deleted_lines,
-                },
-            )
-            workspace.stage_for_harness()
-            with StateStore(self.config.state_dir) as state:
-                state.mark_testing(job.id)
-            self._event(
-                job.id,
-                "tests_started",
-                "configured repository harness started",
-                {"commands": len(repository.test_commands)},
-            )
-            tests = self._run_tests(repository, workspace.path, environment)
-            with StateStore(self.config.state_dir) as state:
-                state.record_tests(job.id, tests)
-            failed = [test for test in tests if test["returncode"] != 0]
-            if failed:
-                raise FixAgentError(_test_failure_error(failed))
-            self._event(
-                job.id,
-                "result_validation_started",
-                "Codex started validating the completed fix",
-                {"workspace_base": workspace.base_commit},
-            )
-            postcheck = self.agent.validate_fix(
-                repository, job, workspace.path, environment, workspace.base_commit
-            )
-            with StateStore(self.config.state_dir) as state:
-                state.record_postcheck(job.id, postcheck.valid, postcheck.reason)
-            self._event(
-                job.id,
-                "result_validation_completed",
-                "Codex completed validation of the fix result",
-                {"valid": postcheck.valid, "reason": postcheck.reason},
-            )
-            if not postcheck.valid:
-                raise FixAgentError(
-                    "completed fix did not pass independent validation: "
-                    + postcheck.reason
-                )
-            workspace.validate_diff()
             branch, commit = workspace.commit()
             self._event(
                 job.id,
@@ -532,6 +472,153 @@ class FixWorker:
                 }
             )
         return results
+
+    def _fix_until_valid(
+        self,
+        repository: RepositoryConfig,
+        job: Job,
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+    ) -> tuple[DiffSummary, list[dict[str, object]], Decision]:
+        iteration = 1
+        retry_error = job.last_error
+        retry_tests = job.tests_json
+        while True:
+            iteration_job = replace(
+                job,
+                attempts=job.attempts + iteration - 1,
+                last_error=retry_error,
+                tests_json=retry_tests,
+            )
+            retrying = bool(retry_error)
+            self._event(
+                job.id,
+                "fix_started",
+                (
+                    f"{iteration}차 보완 수정 시작"
+                    if retrying
+                    else "검증된 finding 수정 시작"
+                ),
+                {
+                    "workspace_base": workspace.base_commit,
+                    "iteration": iteration,
+                    "same_worktree": iteration > 1,
+                    "previous_error": retry_error[:4_000] if retry_error else None,
+                },
+                notify=True,
+            )
+            tests: list[dict[str, object]] = []
+            try:
+                self.agent.apply_fix(
+                    repository,
+                    iteration_job,
+                    workspace.path,
+                    environment,
+                    workspace.base_commit,
+                )
+                self._event(
+                    job.id,
+                    "fix_applied",
+                    f"{iteration}차 수정안 생성 완료, 정책·하네스 검증 시작",
+                    {
+                        "workspace_base": workspace.base_commit,
+                        "iteration": iteration,
+                    },
+                    notify=True,
+                )
+                summary = workspace.validate_diff()
+                self._event(
+                    job.id,
+                    "diff_validated",
+                    "수정안이 저장소 변경 정책 통과",
+                    {
+                        "files": list(summary.files),
+                        "added_lines": summary.added_lines,
+                        "deleted_lines": summary.deleted_lines,
+                        "iteration": iteration,
+                    },
+                )
+                workspace.stage_for_harness()
+                with StateStore(self.config.state_dir) as state:
+                    state.mark_testing(job.id)
+                self._event(
+                    job.id,
+                    "tests_started",
+                    "설정된 저장소 하네스 실행 시작",
+                    {
+                        "commands": len(repository.test_commands),
+                        "iteration": iteration,
+                    },
+                )
+                tests = self._run_tests(repository, workspace.path, environment)
+                with StateStore(self.config.state_dir) as state:
+                    state.record_tests(job.id, tests)
+                failed = [test for test in tests if test["returncode"] != 0]
+                if failed:
+                    raise FixAgentError(_test_failure_error(failed))
+                self._event(
+                    job.id,
+                    "result_validation_started",
+                    "수정 결과 독립 검증 시작",
+                    {"workspace_base": workspace.base_commit, "iteration": iteration},
+                )
+                postcheck = self.agent.validate_fix(
+                    repository,
+                    iteration_job,
+                    workspace.path,
+                    environment,
+                    workspace.base_commit,
+                )
+                with StateStore(self.config.state_dir) as state:
+                    state.record_postcheck(
+                        job.id,
+                        postcheck.valid,
+                        postcheck.reason,
+                        retry_on_failure=True,
+                    )
+                self._event(
+                    job.id,
+                    "result_validation_completed",
+                    "수정 결과 독립 검증 완료",
+                    {
+                        "valid": postcheck.valid,
+                        "reason": postcheck.reason,
+                        "iteration": iteration,
+                    },
+                )
+                if not postcheck.valid:
+                    raise FixAgentError(
+                        "completed fix did not pass independent validation: "
+                        + postcheck.reason
+                    )
+                workspace.validate_diff()
+                return summary, tests, postcheck
+            except FixAgentError as exc:
+                total_attempt = job.attempts + iteration - 1
+                if (
+                    repository.max_attempts != 0
+                    and total_attempt >= repository.max_attempts
+                ):
+                    raise
+                retry_error = str(exc)
+                if tests:
+                    retry_tests = json.dumps(tests, ensure_ascii=False)
+                with StateStore(self.config.state_dir) as state:
+                    state.record_fix_iteration_failure(job.id, retry_error, tests)
+                self._event(
+                    job.id,
+                    "fix_iteration_failed",
+                    "검증 실패 내용을 반영해 같은 worktree에서 수정 계속",
+                    {
+                        "iteration": iteration,
+                        "next_iteration": iteration + 1,
+                        "error": retry_error[:4_000],
+                        "same_worktree": True,
+                        "path": str(workspace.path),
+                    },
+                    notify=True,
+                )
+                iteration += 1
 
     def _push(
         self,

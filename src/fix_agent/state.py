@@ -458,10 +458,27 @@ class StateStore:
     def mark_testing(self, job_id: int) -> None:
         self._update(job_id, "testing")
 
-    def record_postcheck(self, job_id: int, valid: bool, reason: str) -> None:
+    def record_fix_iteration_failure(
+        self, job_id: int, error: str, results: list[dict[str, object]]
+    ) -> None:
         self._update(
             job_id,
-            "ready" if valid else "rejected",
+            "fixing",
+            last_error=error[:20_000],
+            tests_json=json.dumps(results, ensure_ascii=False),
+        )
+
+    def record_postcheck(
+        self,
+        job_id: int,
+        valid: bool,
+        reason: str,
+        *,
+        retry_on_failure: bool = False,
+    ) -> None:
+        self._update(
+            job_id,
+            "ready" if valid else ("fixing" if retry_on_failure else "rejected"),
             postcheck_status="resolved" if valid else "invalid",
             postcheck_reason=reason,
         )

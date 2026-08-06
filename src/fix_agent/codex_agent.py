@@ -252,9 +252,10 @@ def _retry_context(job: Job) -> str:
     test_context = "\n".join(failed_tests) or "- No recorded harness result."
     return f"""
 
-This is retry attempt {job.attempts}. The previous attempt was discarded after
-it failed, so reproduce the fix from the clean current worktree and address the
-recorded failure. Do not hide, skip, or weaken repository checks.
+This is retry attempt {job.attempts}. Inspect the current worktree diff first.
+Continue from the existing diff when present; otherwise recreate the smallest
+valid fix. Address the recorded failure.
+Do not hide, skip, or weaken repository checks.
 
 Previous failure:
 {job.last_error[-4_000:]}

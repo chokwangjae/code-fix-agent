@@ -64,6 +64,7 @@ class DiscordPayloadTest(unittest.TestCase):
             "finding_validation_completed": "✅ 코드 수정 finding 검증 완료",
             "fix_started": "🛠️ 코드 수정 시작",
             "fix_applied": "🛠️ 코드 수정안 생성 완료",
+            "fix_iteration_failed": "🔄 코드 수정 보완 계속",
             "retry_scheduled": "🔄 코드 수정 재시도 예정",
         }
         for event_type, title in expected.items():
