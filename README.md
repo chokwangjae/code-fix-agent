@@ -53,7 +53,7 @@ curl http://127.0.0.1:7081/health
 - `code-review-agent` 규격 호환 저장소별 Discord 알림, 검증·수정 단계 통지와 실패 재시도
 - Crontrol에 현재 repository, job ID, 처리 단계와 대기 건수 자동 동기화
 
-Discord 알림은 `fix-agent.toml`의 저장소별 `[repositories.discord]`에서 켠다. 현재 기본 설정은 실제 발송을 막기 위해 `enabled = false`다. `true`로 바꾼 뒤 `webhook_url_env`에 적힌 환경 변수에 웹훅 URL을 넣으면 `serve`와 `run-once`가 작업 이벤트를 전송한다. 수동 전송·재시도는 다음 명령으로 확인한다.
+Discord 알림은 `fix-agent.toml`의 저장소별 `[repositories.discord]`에서 켠다. 알림을 받을 저장소는 `enabled = true`로 설정한다. `webhook_url`을 직접 넣거나 `webhook_url_env`에 적힌 환경 변수로 주소를 전달하면 `serve`와 `run-once`가 작업 이벤트를 전송한다. 발송을 멈추려면 해당 저장소의 `enabled`를 `false`로 바꾼다. 수동 전송·재시도는 다음 명령으로 확인한다.
 
 웹훅 주소를 TOML에 직접 넣으면 `webhook_url_env`를 제거하고 다음과 같이 설정한다.
 
