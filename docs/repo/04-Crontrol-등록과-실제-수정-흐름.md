@@ -11,7 +11,7 @@ Crontrol에는 리뷰 판정 내용이 아니라 수정 에이전트의 실행 �
 | 필드 | 값 |
 |---|---|
 | `id` | `code-fix-agent-server` |
-| `name` | `Codex Fix Agent` |
+| `name` | `Code Fix Agent` |
 | `type` | `launchd` |
 | `scope` | `external` |
 | `sessionId` | `launchd` |
@@ -23,7 +23,7 @@ Crontrol에는 리뷰 판정 내용이 아니라 수정 에이전트의 실행 �
 | `launchdLabel` | `com.inswave.code-fix-agent` |
 | `healthUrl` | `http://127.0.0.1:7081/health` |
 
-Crontrol의 공통 계약은 NAME에 ``[owner/repository] 작업명`` 형식을 권장하지만, 이 서비스는 화면에서 `Codex Fix Agent`로만 표시한다. organization과 repository 이름을 NAME 앞에 붙이지 않는다. 이 프로젝트의 Crontrol 등록·재등록·상태 동기화에서는 `name: Codex Fix Agent`를 고정값으로 사용한다. branch는 별도 필드로 보낸다. `status`는 등록 상태, `running`은 현재 실행 여부, `lastResult`는 최근 확인 결과다. 세 필드의 의미를 섞지 않는다.
+Crontrol의 공통 계약은 NAME에 ``[owner/repository] 작업명`` 형식을 권장하지만, 이 서비스는 repository 이름을 읽기 좋게 바꾼 `Code Fix Agent`로만 표시한다. organization과 repository 접두어를 NAME 앞에 붙이지 않는다. 이 프로젝트의 Crontrol 등록·재등록·상태 동기화에서는 `name: Code Fix Agent`를 고정값으로 사용한다. branch는 별도 필드로 보낸다. `status`는 등록 상태, `running`은 현재 실행 여부, `lastResult`는 최근 확인 결과다. 세 필드의 의미를 섞지 않는다.
 
 이 서버는 `KeepAlive`로 상시 실행되므로 실제 cron 주기가 없다. `continuous`나 임의의 5-field cron을 보내면 Crontrol의 SCHEDULE 의미와 달라지므로 `schedule`을 생략한다. Dashboard에는 `-`로 표시된다. 정기 launchd 작업을 추가할 때는 그 작업의 실제 주기를 5-field cron으로 보내야 한다.
 
@@ -38,7 +38,7 @@ curl --request POST http://127.0.0.1:7070/api/jobs \
   --header 'Content-Type: application/json' \
   --data-binary '{
     "id":"code-fix-agent-server",
-    "name":"Codex Fix Agent",
+    "name":"Code Fix Agent",
     "type":"launchd",
     "status":"active",
     "scope":"external",
@@ -59,7 +59,7 @@ Crontrol에 `CRONTROL_API_TOKEN`이 설정돼 있으면 `X-Crontrol-API-Token` �
 curl http://127.0.0.1:7070/api/v1/jobs
 ```
 
-Dashboard의 `All` 또는 `External` 범위에서 `Codex Fix Agent`를 찾을 수 있어야 한다. NAME 보조 줄은 `main`, SCHEDULE은 `-`, STATUS는 실행 중이면 `running · last PASS`로 표시된다. Crontrol DB reset이나 서버 이전 후에는 같은 ID와 이름으로 다시 등록한다.
+Dashboard의 `All` 또는 `External` 범위에서 `Code Fix Agent`를 찾을 수 있어야 한다. NAME 보조 줄은 `main`, SCHEDULE은 `-`, STATUS는 실행 중이면 `running · last PASS`로 표시된다. Crontrol DB reset이나 서버 이전 후에는 같은 ID와 이름으로 다시 등록한다.
 
 `running` 값은 등록 시점의 상태다. 현재 Crontrol은 code-fix-agent의 health endpoint를 주기적으로 호출하지 않는다. 재시작·중지 후에는 `launchctl print`와 `/health`를 확인한 다음 `PATCH /api/jobs/code-fix-agent-server`로 `status`, `running`, `lastResult`를 갱신한다. 프로세스가 중지됐거나 health 확인에 실패했으면 `status: active`, `running: false`, `lastResult: FAIL`을 보낸다. `disabled`는 운영자가 서비스를 비활성화한 경우에만 사용한다. 추후 heartbeat를 구현하면 이 문서와 Crontrol 연동 payload를 같은 commit에서 갱신한다.
 
