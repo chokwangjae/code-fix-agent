@@ -59,6 +59,28 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(FixAgentError, "non-negative"):
                 load_config(path)
 
+    def test_accepts_zero_change_limits_as_unlimited(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                "max_changed_files = 3", "max_changed_files = 0"
+            ).replace("max_changed_lines = 100", "max_changed_lines = 0")
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+
+        self.assertEqual(config.repositories[0].policy.max_changed_files, 0)
+        self.assertEqual(config.repositories[0].policy.max_changed_lines, 0)
+
+    def test_rejects_negative_change_limits(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                "max_changed_files = 3", "max_changed_files = -1"
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "non-negative"):
+                load_config(path)
+
     def test_enabled_discord_requires_one_webhook_source(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "fix.toml"

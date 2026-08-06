@@ -52,6 +52,42 @@ class WorkspaceTest(unittest.TestCase):
                 with self.assertRaisesRegex(FixAgentError, "new files are not allowed"):
                     workspace.validate_diff()
 
+    def test_zero_change_limits_allow_any_diff_size(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(
+                root,
+                repository_path,
+                policy="""
+[repositories.policy]
+allowed_paths = ["**"]
+max_changed_files = 0
+max_changed_lines = 0
+allow_new_files = true
+""",
+            )
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            with FixWorkspace(
+                CommandRunner(), config.repositories[0], work_job, config.state_dir
+            ) as workspace:
+                (workspace.path / "src/app.py").write_text(
+                    "fixed\n" * 600, encoding="utf-8"
+                )
+                for index in range(12):
+                    (workspace.path / f"src/new-{index}.py").write_text(
+                        "new\n", encoding="utf-8"
+                    )
+                summary = workspace.validate_diff()
+
+        self.assertEqual(len(summary.files), 13)
+        self.assertGreater(summary.added_lines + summary.deleted_lines, 500)
+
     def test_reconciles_recorded_worktree_after_push_cleanup_failure(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -130,7 +166,10 @@ class WorkspaceTest(unittest.TestCase):
 
     @staticmethod
     def _config(
-        root: Path, repository: Path, publish_mode: str = "pull_request"
+        root: Path,
+        repository: Path,
+        publish_mode: str = "pull_request",
+        policy: str = "",
     ):
         path = root / "fix.toml"
         path.write_text(
@@ -149,6 +188,7 @@ github_token = "test-only-token"
 test_commands = []
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
+{policy}
 """,
             encoding="utf-8",
         )

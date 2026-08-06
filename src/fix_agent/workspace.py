@@ -391,7 +391,7 @@ class FixWorkspace:
         if not changes:
             raise FixAgentError("fix produced no file changes")
         policy = self.repository.policy
-        if len(changes) > policy.max_changed_files:
+        if policy.max_changed_files and len(changes) > policy.max_changed_files:
             raise FixAgentError(
                 f"fix changed {len(changes)} files; limit is {policy.max_changed_files}"
             )
@@ -426,7 +426,7 @@ class FixWorkspace:
                 raise FixAgentError("binary or malformed diff is not allowed")
             added += int(columns[0])
             deleted += int(columns[1])
-        if added + deleted > policy.max_changed_lines:
+        if policy.max_changed_lines and added + deleted > policy.max_changed_lines:
             raise FixAgentError(
                 f"fix changed {added + deleted} lines; limit is {policy.max_changed_lines}"
             )

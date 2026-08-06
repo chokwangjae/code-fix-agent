@@ -60,8 +60,9 @@ denied_paths = [
 ]
 skipped_paths = []
 skipped_fingerprints = []
-max_changed_files = 10
-max_changed_lines = 500
+# 0이면 변경량을 제한하지 않는다.
+max_changed_files = 0
+max_changed_lines = 0
 allow_new_files = true
 allow_deletions = true
 require_finding_file_changed = true

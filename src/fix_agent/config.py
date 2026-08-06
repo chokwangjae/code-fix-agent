@@ -424,11 +424,11 @@ def _policy(raw: Any, context: str) -> RepositoryPolicy:
         denied_paths=denied_paths,
         skipped_paths=skipped_paths,
         skipped_fingerprints=fingerprints,
-        max_changed_files=_positive_integer(
-            raw.get("max_changed_files", 10), f"{context}.max_changed_files"
+        max_changed_files=_nonnegative_integer(
+            raw.get("max_changed_files", 0), f"{context}.max_changed_files"
         ),
-        max_changed_lines=_positive_integer(
-            raw.get("max_changed_lines", 500), f"{context}.max_changed_lines"
+        max_changed_lines=_nonnegative_integer(
+            raw.get("max_changed_lines", 0), f"{context}.max_changed_lines"
         ),
         allow_new_files=allow_new_files,
         allow_deletions=allow_deletions,
