@@ -77,6 +77,7 @@ timeout_seconds = 30
 - [리뷰 에이전트 연동 가이드](docs/repo/01-리뷰-에이전트-연동-가이드.md): 설치, 로컬·HTTP 연결, 작업 상태와 운영 조건
 - [리뷰 이벤트 v1 계약](docs/repo/02-리뷰-이벤트-v1-계약.md): 필드, fingerprint, 응답, 오류, 재시도와 호환성 규칙
 - [수정 작업과 worktree 생명주기](docs/repo/03-수정-작업과-worktree-생명주기.md): 최신 target 동기화, merge 충돌 해결, 작업별 push, 정리와 event log
+- [Crontrol 등록과 실제 수정 흐름](docs/repo/04-Crontrol-등록과-실제-수정-흐름.md): Crontrol 서비스 표시, finding 재검증부터 worktree 정리까지의 전체 절차
 
 ## 검증
 
