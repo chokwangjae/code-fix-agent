@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from fix_agent.codex_agent import Decision
-from fix_agent.command import CommandRunner
+from fix_agent.command import CommandResult, CommandRunner
 from fix_agent.config import load_config
 from fix_agent.contract import parse_review_event
 from fix_agent.state import StateStore
@@ -141,7 +141,66 @@ class RecordingCrontrol:
         return True
 
 
+class FlakySetupRunner(CommandRunner):
+    def __init__(self) -> None:
+        self.setup_calls = 0
+
+    def run(self, command, **kwargs):
+        if list(command) == ["setup-fixture"]:
+            self.setup_calls += 1
+            if self.setup_calls == 1:
+                return CommandResult("", "temporary registry failure", 1)
+            return CommandResult("setup complete", "", 0)
+        return super().run(command, **kwargs)
+
+
 class WorkerTest(unittest.TestCase):
+    def test_retries_environment_setup_in_same_worktree_and_reuses_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+github_token = "test-only-token"
+setup_commands = [["setup-fixture"]]
+test_commands = []
+[repositories.execution]
+setup_max_attempts = 2
+setup_retry_delay_seconds = 0
+max_attempts = 1
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target)
+            runner = FlakySetupRunner()
+            worker = LocalWorker(config, runner, FakeAgent())
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                event_types = [
+                    event.event_type for event in state.events(completed.id)
+                ]
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(runner.setup_calls, 2)
+        self.assertEqual(event_types.count("environment_setup_started"), 1)
+        self.assertEqual(event_types.count("environment_setup_failed"), 1)
+        self.assertEqual(event_types.count("environment_setup_completed"), 1)
+        self.assertEqual(event_types.count("worktree_created"), 1)
+
     def test_records_both_decisions_and_completes_job(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -18,6 +18,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.target_branch, "main")
         self.assertEqual(repository.publish_mode, "direct")
         self.assertEqual(repository.max_attempts, 0)
+        self.assertEqual(repository.setup_max_attempts, 2)
+        self.assertEqual(repository.setup_retry_delay_seconds, 3)
+        self.assertEqual(repository.setup_commands, (("python3", "-m", "pip", "install"),))
+        self.assertIn("**/package-lock.json", repository.setup_watch_paths)
         self.assertEqual(repository.retry_delay_seconds, 15)
         self.assertEqual(repository.max_remote_merge_attempts, 4)
         self.assertTrue(repository.discord.enabled)
@@ -57,6 +61,17 @@ class ConfigTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(FixAgentError, "non-negative"):
+                load_config(path)
+
+    def test_rejects_invalid_setup_command(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'setup_commands = [["python3", "-m", "pip", "install"]]',
+                'setup_commands = ["python3"]',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, r"setup_commands\[0\]"):
                 load_config(path)
 
     def test_accepts_zero_change_limits_as_unlimited(self) -> None:
@@ -242,6 +257,7 @@ local_path = "repo"
 publish_mode = "direct"
 github_token_env = "FIX_GITHUB_TOKEN"
 test_commands = [["python3", "-m", "unittest"]]
+setup_commands = [["python3", "-m", "pip", "install"]]
 additional_instructions = "Preserve the public API."
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
@@ -250,6 +266,8 @@ enabled = true
 webhook_url_env = "FIX_DISCORD_WEBHOOK_URL"
 timeout_seconds = 20
 [repositories.execution]
+setup_max_attempts = 2
+setup_retry_delay_seconds = 3
 max_attempts = 0
 retry_delay_seconds = 15
 max_remote_merge_attempts = 4

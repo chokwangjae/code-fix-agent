@@ -17,9 +17,20 @@ publish_mode = "direct"
 github_token_env = "MATRIX_MOBILE_FIX_GITHUB_TOKEN"
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
+setup_commands = [
+  ["flutter", "pub", "get", "-C", "client/matrix_flutter_template"],
+  ["npm", "install", "--prefix", "client/matrix_rn_template", "--no-package-lock", "--prefer-offline", "--no-audit", "--no-fund"],
+]
+setup_watch_paths = [
+  "client/matrix_flutter_template/pubspec.yaml",
+  "client/matrix_flutter_template/pubspec.lock",
+  "client/matrix_rn_template/package.json",
+]
 
 [repositories.execution]
 command_timeout_seconds = 7200
+setup_max_attempts = 3
+setup_retry_delay_seconds = 15
 max_attempts = 0
 retry_delay_seconds = 30
 max_remote_merge_attempts = 3
@@ -137,22 +148,38 @@ git worktree add --detach \
 
 이 시점에는 수정 branch를 만들지 않는다. 원래 checkout의 현재 branch와 작업 파일도 바꾸지 않는다. 생성 경로, remote, target branch와 base commit은 `worktree_created` event에 남긴다.
 
-## 4. finding 검증과 수정
+## 4. 환경 준비
+
+Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서대로 실행한다. 각 명령은 shell을 통하지 않는 argument 배열이며 Codex·하네스와 같은 비밀값 제거 환경을 사용한다. 한 명령이 실패하면 처음부터 다시 실행하며 `setup_max_attempts`와 `setup_retry_delay_seconds`로 횟수와 간격을 정한다.
+
+준비 전후의 tracked diff와 Git이 추적할 새 파일 내용을 비교한다. 설치 명령이 lockfile이나 프로젝트 파일을 바꾸면 실행 전 내용을 복원한다. Codex가 작업 중 바꾼 파일은 그 시점의 내용을 보관했다가 되돌리므로 의도한 수정은 유지한다. 복원 뒤 diff가 준비 전과 다르면 환경 준비 실패로 처리하며 push하지 않는다. `node_modules`, Gradle cache와 Playwright 사용자 cache처럼 `.gitignore` 또는 전역 cache에 있는 파일은 비교 대상에서 빠진다.
+
+`setup_watch_paths`는 준비 결과가 의존하는 파일을 지정한다. 최초 준비 뒤 Codex 수정이나 원격 merge로 이 파일들의 내용이 바뀌면 하네스 전에 준비 명령을 다시 실행한다. 내용이 같으면 같은 worktree에서 설치를 반복하지 않는다.
+
+다음 event가 중간 경과와 실패 출력을 남긴다.
+
+- `environment_setup_started`: 실행할 명령 수와 감시 경로
+- `environment_setup_failed`: 실패 명령, 종료 코드, 제한한 stdout·stderr와 다음 재시도 여부
+- `environment_setup_completed`: 성공한 시도, 명령 수와 복원한 Git 경로
+
+## 5. finding 검증과 수정
 
 worktree 안에서 다음 단계를 실행한다.
 
 1. finding 도입 commit이 리뷰 target의 조상인지 확인
 2. 도입 commit이 finding 파일을 변경했는지 확인
 3. finding line이 `baseline..target` diff에 속하는지 확인
-4. read-only Codex의 독립 사실 검증과 사유 기록
-5. workspace-write Codex의 최소 수정
-6. 경로·파일 수·line 수·symlink·binary 정책 검사
-7. 대상 저장소 하네스 실행
-8. read-only Codex의 수정 결과 검증과 사유 기록
+4. 저장소 환경 준비 완료
+5. read-only Codex의 독립 사실 검증과 사유 기록
+6. workspace-write Codex의 최소 수정
+7. 의존성 선언 변경 시 환경 준비 갱신
+8. 경로·파일 수·line 수·symlink·binary 정책 검사
+9. 대상 저장소 하네스 실행
+10. read-only Codex의 수정 결과 검증과 사유 기록
 
 Codex와 테스트 환경에서는 GitHub token, 일반적인 token·secret·password와 webhook 환경 변수를 제거한다. Git network 명령에만 별도 인증 환경을 사용한다.
 
-## 5. fix commit 생성
+## 6. fix commit 생성
 
 초기 정책·테스트·수정 결과 검증을 통과하면 수정분을 commit한다.
 
@@ -174,7 +201,7 @@ autofix/<repository-id>/<fingerprint 앞 12자리>
 
 생성 branch와 commit은 `fix_committed` event에 남긴다.
 
-## 6. 원격 이동 감지와 merge
+## 7. 원격 이동 감지와 merge
 
 commit 뒤 `origin/dev`를 다시 fetch한다. 현재 원격 commit이 workspace base와 같으면 push 단계로 간다. 다르면 `target_moved` event를 남기고 worktree에서 최신 target을 merge한다.
 
@@ -225,7 +252,7 @@ git -c user.name="broken-agent" \
 
 남은 unmerged 파일이나 conflict marker가 있으면 실패한다. 성공하면 해결 사유와 merge commit을 `merge_conflict_resolved` event에 기록한다.
 
-## 7. merge 후 전체 재검증
+## 8. merge 후 전체 재검증
 
 원격 target을 merge하면 최신 target commit을 새 workspace base로 바꾼다. 새 base 대비 agent 변경분만 다시 검사한다.
 
@@ -236,7 +263,7 @@ git -c user.name="broken-agent" \
 
 모두 통과하면 `merged_fix_revalidated` event를 남긴다. 검증 중 원격 target이 또 이동하면 merge와 재검증을 반복한다. 반복 횟수는 `max_remote_merge_attempts`로 제한하며 기본값은 3이다.
 
-## 8. 작업별 push
+## 9. 작업별 push
 
 `direct` 설정은 다음 형태로 push한다.
 
@@ -246,11 +273,11 @@ git push origin HEAD:refs/heads/dev
 
 force push와 `--set-upstream`은 사용하지 않는다. push 직전과 직후에는 각각 `push_started`, `push_completed` event를 기록한다.
 
-fetch와 push 사이에 원격이 이동해 non-fast-forward가 발생하면 최신 target을 다시 fetch한다. 변경된 commit을 merge하고 7단계 검증을 다시 통과한 뒤 push를 재시도한다. 원격 HEAD가 이미 worktree 결과 commit이면 앞선 push가 성공하고 응답만 유실된 것으로 간주한다.
+fetch와 push 사이에 원격이 이동해 non-fast-forward가 발생하면 최신 target을 다시 fetch한다. 변경된 commit을 merge하고 8단계 검증을 다시 통과한 뒤 push를 재시도한다. 원격 HEAD가 이미 worktree 결과 commit이면 앞선 push가 성공하고 응답만 유실된 것으로 간주한다.
 
 `pull_request` 설정은 `autofix/...` branch를 push한 뒤 `gh pr create`를 실행한다. 어느 방식도 force push나 자동 merge를 사용하지 않는다.
 
-## 9. worktree 제거
+## 10. worktree 제거
 
 정상 완료, 오탐 거부, 정책 실패, 테스트 실패, merge 실패와 Python 예외 모두 context 종료 경로에서 worktree 정리를 시도한다.
 

@@ -34,6 +34,15 @@ additional_instructions = ""
 commit_message_template = "fix: resolve review finding {fingerprint_short}"
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
+setup_commands = [
+  ["flutter", "pub", "get", "-C", "client/matrix_flutter_template"],
+  ["npm", "install", "--prefix", "client/matrix_rn_template", "--no-package-lock", "--prefer-offline", "--no-audit", "--no-fund"],
+]
+setup_watch_paths = [
+  "client/matrix_flutter_template/pubspec.yaml",
+  "client/matrix_flutter_template/pubspec.lock",
+  "client/matrix_rn_template/package.json",
+]
 
 [repositories.discord]
 enabled = true
@@ -44,6 +53,8 @@ timeout_seconds = 30
 
 [repositories.execution]
 command_timeout_seconds = 7200
+setup_max_attempts = 3
+setup_retry_delay_seconds = 15
 max_attempts = 0
 retry_delay_seconds = 30
 max_remote_merge_attempts = 3

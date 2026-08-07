@@ -17,6 +17,26 @@ _GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SEVERITIES = ("Critical", "Major", "Minor")
 _PUBLISH_MODES = ("pull_request", "direct")
+_DEFAULT_SETUP_WATCH_PATHS = (
+    "package.json",
+    "package-lock.json",
+    "**/package.json",
+    "**/package-lock.json",
+    "pubspec.yaml",
+    "pubspec.lock",
+    "**/pubspec.yaml",
+    "**/pubspec.lock",
+    "Podfile",
+    "Podfile.lock",
+    "**/Podfile",
+    "**/Podfile.lock",
+    "gradle/wrapper/gradle-wrapper.properties",
+    "**/gradle/wrapper/gradle-wrapper.properties",
+    "*.gradle",
+    "*.gradle.kts",
+    "**/*.gradle",
+    "**/*.gradle.kts",
+)
 
 
 @dataclass(frozen=True)
@@ -97,12 +117,16 @@ class RepositoryConfig:
     github_token: str | None = field(repr=False)
     github_token_env: str | None
     discord: DiscordConfig
+    setup_commands: tuple[tuple[str, ...], ...]
+    setup_watch_paths: tuple[str, ...]
     test_commands: tuple[tuple[str, ...], ...]
     additional_instructions: str
     commit_message_template: str
     git_author_name: str
     git_author_email: str
     command_timeout_seconds: int
+    setup_max_attempts: int
+    setup_retry_delay_seconds: int
     max_attempts: int
     retry_delay_seconds: int
     max_remote_merge_attempts: int
@@ -252,7 +276,15 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
     github = _required_string(raw, "github", context)
     if not _GITHUB_REPOSITORY.fullmatch(github):
         raise FixAgentError(f"{context}.github must use owner/repository")
-    test_commands = _commands(raw.get("test_commands", []), context)
+    setup_commands = _commands(
+        raw.get("setup_commands", []), context, "setup_commands"
+    )
+    setup_watch_paths = _patterns(
+        raw.get("setup_watch_paths", list(_DEFAULT_SETUP_WATCH_PATHS)),
+        f"{context}.setup_watch_paths",
+        allow_empty=True,
+    )
+    test_commands = _commands(raw.get("test_commands", []), context, "test_commands")
     additional_instructions = raw.get("additional_instructions", "")
     if not isinstance(additional_instructions, str):
         raise FixAgentError(f"{context}.additional_instructions must be a string")
@@ -309,6 +341,8 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         github_token=github_token,
         github_token_env=github_token_env,
         discord=_discord(raw.get("discord"), context),
+        setup_commands=setup_commands,
+        setup_watch_paths=setup_watch_paths,
         test_commands=test_commands,
         additional_instructions=additional_instructions.strip(),
         commit_message_template=commit_message_template.strip(),
@@ -317,6 +351,14 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         command_timeout_seconds=_positive_integer(
             execution.get("command_timeout_seconds", 1800),
             f"{context}.execution.command_timeout_seconds",
+        ),
+        setup_max_attempts=_positive_integer(
+            execution.get("setup_max_attempts", 3),
+            f"{context}.execution.setup_max_attempts",
+        ),
+        setup_retry_delay_seconds=_nonnegative_integer(
+            execution.get("setup_retry_delay_seconds", 15),
+            f"{context}.execution.setup_retry_delay_seconds",
         ),
         max_attempts=_nonnegative_integer(
             execution.get("max_attempts", 1), f"{context}.execution.max_attempts"
@@ -436,12 +478,14 @@ def _policy(raw: Any, context: str) -> RepositoryPolicy:
     )
 
 
-def _commands(raw: Any, context: str) -> tuple[tuple[str, ...], ...]:
+def _commands(
+    raw: Any, context: str, key: str
+) -> tuple[tuple[str, ...], ...]:
     if not isinstance(raw, list):
-        raise FixAgentError(f"{context}.test_commands must be an array")
+        raise FixAgentError(f"{context}.{key} must be an array")
     commands = []
     for index, value in enumerate(raw):
-        command = _string_array(value, f"{context}.test_commands[{index}]")
+        command = _string_array(value, f"{context}.{key}[{index}]")
         commands.append(command)
     return tuple(commands)
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import fnmatch
+import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tempfile
@@ -46,6 +48,14 @@ class MergeResult:
     previous_base: str
     current_target: str
     conflict_files: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PathSnapshot:
+    exists: bool
+    contents: bytes | None = None
+    link_target: str | None = None
+    mode: int | None = None
 
 
 class FixWorkspace:
@@ -493,6 +503,183 @@ class FixWorkspace:
         self.runner.run(
             ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
         )
+
+    def setup_signature(self, patterns: tuple[str, ...]) -> str:
+        files = self.runner.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.split("\0")
+        selected = tuple(
+            sorted(
+                file
+                for file in files
+                if file
+                and any(
+                    fnmatch.fnmatchcase(file, pattern)
+                    or PurePosixPath(file).match(pattern)
+                    for pattern in patterns
+                )
+            )
+        )
+        return self._files_signature(selected, patterns)
+
+    def working_tree_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+        diff = self.runner.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout
+        digest.update(diff.encode("utf-8"))
+        untracked = tuple(
+            sorted(
+                file
+                for file in self.runner.run(
+                    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                    cwd=self.path,
+                    environment=self.safe_environment,
+                ).stdout.split("\0")
+                if file
+            )
+        )
+        digest.update(self._files_signature(untracked).encode("ascii"))
+        return digest.hexdigest()
+
+    def snapshot_working_changes(self) -> dict[str, _PathSnapshot]:
+        return {
+            file: self._path_snapshot(file) for file in self._changed_worktree_paths()
+        }
+
+    def restore_working_changes(
+        self, snapshots: dict[str, _PathSnapshot]
+    ) -> tuple[str, ...]:
+        after_paths = set(self._changed_worktree_paths())
+        before_paths = set(snapshots)
+        tracked = set(
+            file
+            for file in self.runner.run(
+                ["git", "ls-files", "-z"],
+                cwd=self.path,
+                environment=self.safe_environment,
+            ).stdout.split("\0")
+            if file
+        )
+        restored: list[str] = []
+        restore_from_head: list[str] = []
+        for file in sorted(before_paths | after_paths):
+            expected = snapshots.get(file)
+            current = self._path_snapshot(file)
+            if expected is not None and current == expected:
+                continue
+            restored.append(file)
+            if expected is None:
+                if file in tracked:
+                    restore_from_head.append(file)
+                else:
+                    self._remove_setup_file(file)
+                continue
+            self._restore_path_snapshot(file, expected)
+        if restore_from_head:
+            self.runner.run(
+                [
+                    "git",
+                    "restore",
+                    "--source=HEAD",
+                    "--worktree",
+                    "--",
+                    *restore_from_head,
+                ],
+                cwd=self.path,
+                environment=self.safe_environment,
+            )
+        self.runner.run(
+            ["git", "reset", "--mixed", "HEAD"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        return tuple(restored)
+
+    def _changed_worktree_paths(self) -> tuple[str, ...]:
+        tracked = self.runner.run(
+            ["git", "diff", "--name-only", "--no-renames", "-z", "HEAD", "--"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.split("\0")
+        untracked = self.runner.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.split("\0")
+        return tuple(sorted({file for file in tracked + untracked if file}))
+
+    def _path_snapshot(self, file: str) -> _PathSnapshot:
+        candidate = self.path / file
+        if candidate.is_symlink():
+            return _PathSnapshot(True, link_target=os.readlink(candidate))
+        if not candidate.exists():
+            return _PathSnapshot(False)
+        if not candidate.is_file():
+            raise FixAgentError(
+                f"setup guard does not support repository directory changes: {file}"
+            )
+        stat = candidate.stat()
+        return _PathSnapshot(True, candidate.read_bytes(), mode=stat.st_mode & 0o777)
+
+    def _restore_path_snapshot(self, file: str, snapshot: _PathSnapshot) -> None:
+        candidate = self.path / file
+        if candidate.exists() or candidate.is_symlink():
+            if candidate.is_dir() and not candidate.is_symlink():
+                raise FixAgentError(
+                    f"setup command replaced a file with a directory: {file}"
+                )
+            candidate.unlink()
+        if not snapshot.exists:
+            return
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        if snapshot.link_target is not None:
+            candidate.symlink_to(snapshot.link_target)
+            return
+        candidate.write_bytes(snapshot.contents or b"")
+        if snapshot.mode is not None:
+            candidate.chmod(snapshot.mode)
+
+    def _remove_setup_file(self, file: str) -> None:
+        candidate = self.path / file
+        if not (candidate.exists() or candidate.is_symlink()):
+            return
+        if candidate.is_dir() and not candidate.is_symlink():
+            raise FixAgentError(
+                f"setup command created an untracked directory entry: {file}"
+            )
+        candidate.unlink()
+
+    def _files_signature(
+        self, files: tuple[str, ...], patterns: tuple[str, ...] = ()
+    ) -> str:
+        digest = hashlib.sha256()
+        for pattern in patterns:
+            digest.update(b"pattern\0")
+            digest.update(pattern.encode("utf-8"))
+            digest.update(b"\0")
+        for file in files:
+            digest.update(b"file\0")
+            digest.update(file.encode("utf-8"))
+            digest.update(b"\0")
+            candidate = self.path / file
+            if candidate.is_symlink():
+                digest.update(b"link\0")
+                digest.update(os.readlink(candidate).encode("utf-8"))
+                digest.update(b"\0")
+                continue
+            if not candidate.is_file():
+                digest.update(b"missing\0")
+                continue
+            with candidate.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def require_clean_checkout(self) -> None:
         status = self.runner.run(

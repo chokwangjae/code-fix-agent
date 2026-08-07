@@ -88,6 +88,36 @@ allow_new_files = true
         self.assertEqual(len(summary.files), 13)
         self.assertGreater(summary.added_lines + summary.deleted_lines, 500)
 
+    def test_restores_setup_side_effects_without_losing_existing_fix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path)
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            with FixWorkspace(
+                CommandRunner(), config.repositories[0], work_job, config.state_dir
+            ) as workspace:
+                source = workspace.path / "src/app.py"
+                generated = workspace.path / "setup-generated.txt"
+                source.write_text("intended fix\n", encoding="utf-8")
+                before = workspace.working_tree_fingerprint()
+                snapshots = workspace.snapshot_working_changes()
+
+                source.write_text("setup rewrite\n", encoding="utf-8")
+                generated.write_text("setup output\n", encoding="utf-8")
+                restored = workspace.restore_working_changes(snapshots)
+
+                self.assertEqual(workspace.working_tree_fingerprint(), before)
+                self.assertEqual(source.read_text(encoding="utf-8"), "intended fix\n")
+                self.assertFalse(generated.exists())
+
+        self.assertEqual(restored, ("setup-generated.txt", "src/app.py"))
+
     def test_reconciles_recorded_worktree_after_push_cleanup_failure(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

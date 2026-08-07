@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
 import threading
 
 from .codex_agent import CodexAgent, Decision
-from .command import CommandRunner
+from .command import CommandResult, CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .crontrol import CrontrolReporter
 from .credentials import resolve_github_credential
-from .errors import FixAgentError
+from .errors import EnvironmentSetupError, FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
 from .workspace import DiffSummary, FixWorkspace, reconcile_recorded_worktree
@@ -21,6 +21,9 @@ from .workspace import DiffSummary, FixWorkspace, reconcile_recorded_worktree
 _CRONTROL_EVENT_STAGES = {
     "processing_started": "작업 준비",
     "finding_git_validated": "Git 검증 완료",
+    "environment_setup_started": "환경 준비 중",
+    "environment_setup_failed": "환경 준비 재시도 중",
+    "environment_setup_completed": "환경 준비 완료",
     "finding_validation_started": "finding 검증 중",
     "finding_validation_completed": "finding 검증 완료",
     "fix_started": "수정 중",
@@ -40,6 +43,11 @@ _CRONTROL_EVENT_STAGES = {
     "push_started": "push 중",
     "push_completed": "push 완료",
 }
+
+
+@dataclass
+class _SetupState:
+    signature: str | None = None
 
 
 class FixWorker:
@@ -184,6 +192,7 @@ class FixWorker:
             self.runner, repository, job, self.config.state_dir
         ) as workspace:
             environment = workspace.safe_environment
+            setup_state = _SetupState()
             mismatch = workspace.finding_mismatch_reason()
             if mismatch:
                 with StateStore(self.config.state_dir) as state:
@@ -195,6 +204,9 @@ class FixWorker:
                 "finding_git_validated",
                 "finding commit, file, and reviewed line matched the review diff",
                 {"reviewed_target": job.target_commit},
+            )
+            self._prepare_environment(
+                repository, job, workspace, environment, setup_state
             )
             if job.precheck_status == "valid" and job.precheck_reason:
                 decision = Decision(True, job.precheck_reason)
@@ -235,7 +247,7 @@ class FixWorker:
                     return
 
             summary, tests, postcheck = self._fix_until_valid(
-                repository, job, workspace, environment
+                repository, job, workspace, environment, setup_state
             )
             branch, commit = workspace.commit()
             self._event(
@@ -322,6 +334,9 @@ class FixWorker:
                             },
                         )
                     summary = workspace.validate_diff()
+                    self._prepare_environment(
+                        repository, job, workspace, environment, setup_state
+                    )
                     with StateStore(self.config.state_dir) as state:
                         state.mark_testing(job.id)
                     tests = self._run_tests(repository, workspace.path, environment)
@@ -473,12 +488,107 @@ class FixWorker:
             )
         return results
 
+    def _prepare_environment(
+        self,
+        repository: RepositoryConfig,
+        job: Job,
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+    ) -> None:
+        if not repository.setup_commands:
+            return
+        signature = workspace.setup_signature(repository.setup_watch_paths)
+        if setup_state.signature == signature:
+            return
+        head = workspace.head_commit()
+        before = workspace.working_tree_fingerprint()
+        snapshots = workspace.snapshot_working_changes()
+        self._event(
+            job.id,
+            "environment_setup_started",
+            "대상 저장소 의존성·실행 환경 준비 시작",
+            {
+                "commands": len(repository.setup_commands),
+                "watch_paths": list(repository.setup_watch_paths),
+            },
+        )
+        for attempt in range(1, repository.setup_max_attempts + 1):
+            failure: tuple[int, tuple[str, ...], CommandResult] | None = None
+            for index, command in enumerate(repository.setup_commands, start=1):
+                result = self.runner.run(
+                    command,
+                    cwd=workspace.path,
+                    environment=environment,
+                    timeout_seconds=repository.command_timeout_seconds,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    failure = (index, command, result)
+                    break
+            if failure is None:
+                if workspace.head_commit() != head:
+                    raise EnvironmentSetupError(
+                        "environment setup changed the worktree HEAD"
+                    )
+                restored = workspace.restore_working_changes(snapshots)
+                after = workspace.working_tree_fingerprint()
+                if after != before:
+                    raise EnvironmentSetupError(
+                        "environment setup changes could not be isolated from the fix"
+                    )
+                setup_state.signature = workspace.setup_signature(
+                    repository.setup_watch_paths
+                )
+                self._event(
+                    job.id,
+                    "environment_setup_completed",
+                    "대상 저장소 의존성·실행 환경 준비 완료",
+                    {
+                        "attempt": attempt,
+                        "commands": len(repository.setup_commands),
+                        "restored_paths": list(restored),
+                    },
+                )
+                return
+            index, command, result = failure
+            will_retry = attempt < repository.setup_max_attempts
+            detail = (result.stderr or result.stdout or "command failed").strip()
+            self._event(
+                job.id,
+                "environment_setup_failed",
+                (
+                    "환경 준비 명령 실패, 같은 worktree에서 재시도 예정"
+                    if will_retry
+                    else "환경 준비 명령 최종 실패"
+                ),
+                {
+                    "attempt": attempt,
+                    "max_attempts": repository.setup_max_attempts,
+                    "command_index": index,
+                    "command": list(command),
+                    "returncode": result.returncode,
+                    "stdout": result.stdout[-20_000:],
+                    "stderr": result.stderr[-20_000:],
+                    "will_retry": will_retry,
+                },
+            )
+            if not will_retry:
+                raise EnvironmentSetupError(
+                    f"environment setup command failed: {command[0]}: {detail}"
+                )
+            if self._stop.wait(repository.setup_retry_delay_seconds):
+                raise EnvironmentSetupError(
+                    "environment setup stopped before the next retry"
+                )
+
     def _fix_until_valid(
         self,
         repository: RepositoryConfig,
         job: Job,
         workspace: FixWorkspace,
         environment: dict[str, str],
+        setup_state: _SetupState,
     ) -> tuple[DiffSummary, list[dict[str, object]], Decision]:
         iteration = 1
         retry_error = job.last_error
@@ -525,6 +635,9 @@ class FixWorker:
                         "iteration": iteration,
                     },
                     notify=True,
+                )
+                self._prepare_environment(
+                    repository, job, workspace, environment, setup_state
                 )
                 summary = workspace.validate_diff()
                 self._event(
@@ -593,6 +706,8 @@ class FixWorker:
                     )
                 workspace.validate_diff()
                 return summary, tests, postcheck
+            except EnvironmentSetupError:
+                raise
             except FixAgentError as exc:
                 total_attempt = job.attempts + iteration - 1
                 if (

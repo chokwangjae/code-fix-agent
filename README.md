@@ -56,6 +56,7 @@ curl http://127.0.0.1:7081/health
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
 - finding별 최신 target 기반 독립 detached worktree, 원격 이동 시 merge·재검증
+- 새 worktree의 저장소별 의존성·브라우저·컨테이너 사전 준비와 실패 재시도
 - 최대 3개 작업 동시 실행, 같은 작업의 실패 원인과 하네스 출력을 동일 worktree에서 반영
 - append-only 작업 event 기록과 Discord notifier용 순차 event ID
 - `code-review-agent` 규격 호환 저장소별 Discord 알림, 검증·수정 단계 통지와 실패 재시도
@@ -106,9 +107,22 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 기존 diff와 실패 출력을 Codex에 전달해 보완한다. 모든 검증을 통과한 뒤 commit과 push를 실행하고 worktree를 제거한다. 프로세스 오류로 작업이 중단된 경우에만 `retry_delay_seconds` 뒤 최신 target에서 worktree를 다시 만든다.
 
+`setup_commands`는 새 worktree를 만든 뒤 Codex 검증보다 먼저 실행한다. 준비 명령이 실패하면 `setup_max_attempts`만큼 같은 worktree에서 재시도한다. `setup_watch_paths`에 지정한 lockfile이나 빌드 설정이 수정 또는 원격 merge로 바뀌면 하네스 전에 준비 명령을 다시 실행한다. 명령은 shell 문자열이 아닌 argument 배열로 지정한다. 설치 도구가 lockfile이나 프로젝트 파일을 다시 쓰면 실행 전 내용을 복원해 수정 diff와 분리한다.
+
+```toml
+[[repositories]]
+setup_commands = [
+  ["npm", "ci", "--prefix", "web", "--prefer-offline", "--no-audit", "--no-fund"],
+  ["web/node_modules/.bin/playwright", "install", "chromium"],
+]
+setup_watch_paths = ["web/package.json", "web/package-lock.json"]
+```
+
 ```toml
 [repositories.execution]
 command_timeout_seconds = 7200
+setup_max_attempts = 3
+setup_retry_delay_seconds = 15
 max_attempts = 0
 retry_delay_seconds = 30
 max_remote_merge_attempts = 3

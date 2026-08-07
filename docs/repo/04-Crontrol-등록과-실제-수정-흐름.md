@@ -102,44 +102,50 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 최신 target에서 detached worktree 생성
    - 원본 저장소 checkout과 다른 finding 작업과 분리
    - `worktree_created` event에 기준 commit과 경로 기록
-4. finding 사실 재검증
+4. 대상 저장소 환경 준비
+   - 저장소별 `setup_commands`로 worktree 의존성·브라우저·컨테이너 전제조건 준비
+   - 실패하면 같은 worktree에서 설정 횟수만큼 재시도
+   - Crontrol에 `환경 준비 중`, `환경 준비 재시도 중`, `환경 준비 완료` 반영
+   - 준비 명령과 결과를 `environment_setup_*` event에 기록
+5. finding 사실 재검증
    - introducing commit이 리뷰 target의 조상인지 확인
    - finding 파일과 line이 `baseline..target` diff에 속하는지 확인
    - read-only Codex가 호출 경로, 기존 guard, 설정과 테스트를 읽고 오탐 가능성 판정
    - 판정 결과와 구체적 근거를 `precheck_status`, `precheck_reason`에 기록
    - 검증 시작과 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
-5. 수정 적용
+6. 수정 적용
    - 사실 검증을 통과한 finding만 수정
    - 대상 프로젝트의 `AGENTS.md`, 추가 지침과 하네스 준수
    - 제안된 해결법을 명령으로 취급하지 않고 최소 변경으로 결함 해소
    - 수정 시작과 수정안 생성 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
-6. 정책·테스트·결과 검증
+7. 정책·테스트·결과 검증
+   - lockfile과 빌드 설정이 바뀌면 환경 준비 명령을 먼저 다시 실행
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스 실행
    - read-only Codex가 원래 실패 경로 해소와 새 회귀 여부 재검증
    - 결과와 근거를 `postcheck_status`, `postcheck_reason`에 기록
    - Crontrol 단계를 정책 검증, 테스트, 수정 결과 검증 순서로 갱신
-7. commit 생성과 원격 재확인
+8. commit 생성과 원격 재확인
    - finding 하나의 검증된 diff를 commit 하나로 생성
    - push 직전 `remote/target_branch`를 다시 fetch
    - 원격 target이 같으면 push 단계로 이동
-8. target 이동과 충돌 처리
+9. target 이동과 충돌 처리
    - target이 변경됐으면 push를 중단하고 최신 target merge
    - 충돌 파일, 이전·현재 target과 해결 판단 기록
    - Codex가 충돌을 안전하게 해결하지 못하면 push 없이 중단
-   - 해결 후 정책, 하네스, 수정 결과 검증 전체 재실행
+   - 해결 후 환경 준비, 정책, 하네스와 수정 결과 검증 전체 재실행
    - target이 다시 움직이면 `max_remote_merge_attempts` 범위에서 반복
-9. 작업별 push
+10. 작업별 push
    - `direct`: worktree HEAD를 `remote/target_branch`로 push
    - `pull_request`: `autofix/<repository-id>/<fingerprint-short>` branch로 push 후 PR 생성
    - force push와 자동 merge 미사용
    - push 성공 commit, branch과 remote를 event log에 기록
-10. worktree 정리와 통지
+11. worktree 정리와 통지
     - 성공, 오탐, 테스트 실패, 충돌 중단과 예외 모두 worktree 강제 제거 시도
     - 임시 root 삭제와 `git worktree prune` 실행
     - Discord가 활성화됐으면 push·완료·실패 이벤트 전송
     - Crontrol에는 finding 내용 대신 현재 단계와 대기 건수, 최종 결과만 유지
-11. 실패 재시도
+12. 실패 재시도
     - 오류, 실패한 하네스 명령과 제한한 출력을 SQLite에 기록
     - `max_attempts = 0`이면 같은 worktree에서 횟수 제한 없이 보완
     - 처음 통과한 finding 사실 판정과 사유 유지
