@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
@@ -117,6 +119,57 @@ allow_new_files = true
                 self.assertFalse(generated.exists())
 
         self.assertEqual(restored, ("setup-generated.txt", "src/app.py"))
+
+    def test_repairs_worktree_permissions_and_uses_private_runtime_caches(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path)
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            with FixWorkspace(
+                CommandRunner(), config.repositories[0], work_job, config.state_dir
+            ) as workspace:
+                source = workspace.path / "src/app.py"
+                source.parent.chmod(0o500)
+                source.chmod(0o400)
+
+                permissions = workspace.ensure_writable()
+                environment = workspace.safe_environment
+                source.write_text("permission repaired\n", encoding="utf-8")
+
+                self.assertTrue(
+                    stat.S_IMODE(source.stat().st_mode) & stat.S_IWUSR
+                )
+                self.assertTrue(
+                    stat.S_IMODE(source.parent.stat().st_mode) & stat.S_IWUSR
+                )
+                self.assertGreaterEqual(permissions.repaired_files, 1)
+                self.assertGreaterEqual(permissions.repaired_directories, 1)
+                self.assertEqual(environment.get("HOME"), os.environ.get("HOME"))
+                for name in (
+                    "NPM_CONFIG_CACHE",
+                    "GRADLE_USER_HOME",
+                    "PUB_CACHE",
+                    "PLAYWRIGHT_BROWSERS_PATH",
+                    "CP_HOME_DIR",
+                    "TMPDIR",
+                ):
+                    cache = Path(environment[name])
+                    self.assertTrue(cache.is_dir(), name)
+                    self.assertTrue(os.access(cache, os.R_OK | os.W_OK | os.X_OK), name)
+                self.assertTrue(
+                    Path(environment["NPM_CONFIG_CACHE"]).is_relative_to(
+                        config.state_dir / "runtime-cache"
+                    )
+                )
+                self.assertTrue(
+                    Path(environment["TMPDIR"]).is_relative_to(workspace.root)
+                )
 
     def test_reconciles_recorded_worktree_after_push_cleanup_failure(self) -> None:
         with TemporaryDirectory() as directory:

@@ -15,7 +15,12 @@ from .credentials import resolve_github_credential
 from .errors import EnvironmentSetupError, FixAgentError
 from .notify import DiscordNotifier
 from .state import Job, StateStore
-from .workspace import DiffSummary, FixWorkspace, reconcile_recorded_worktree
+from .workspace import (
+    DiffSummary,
+    FixWorkspace,
+    PermissionSummary,
+    reconcile_recorded_worktree,
+)
 
 
 _CRONTROL_EVENT_STAGES = {
@@ -24,6 +29,7 @@ _CRONTROL_EVENT_STAGES = {
     "environment_setup_started": "환경 준비 중",
     "environment_setup_failed": "환경 준비 재시도 중",
     "environment_setup_completed": "환경 준비 완료",
+    "worktree_permissions_repaired": "worktree 권한 복구 완료",
     "finding_validation_started": "finding 검증 중",
     "finding_validation_completed": "finding 검증 완료",
     "fix_started": "수정 중",
@@ -337,6 +343,9 @@ class FixWorker:
                     self._prepare_environment(
                         repository, job, workspace, environment, setup_state
                     )
+                    self._ensure_workspace_permissions(
+                        job, workspace, f"target_merge_{remote_merges}_before_harness"
+                    )
                     with StateStore(self.config.state_dir) as state:
                         state.mark_testing(job.id)
                     tests = self._run_tests(repository, workspace.path, environment)
@@ -501,6 +510,9 @@ class FixWorker:
         signature = workspace.setup_signature(repository.setup_watch_paths)
         if setup_state.signature == signature:
             return
+        self._ensure_workspace_permissions(
+            job, workspace, "environment_setup_before_commands"
+        )
         head = workspace.head_commit()
         before = workspace.working_tree_fingerprint()
         snapshots = workspace.snapshot_working_changes()
@@ -532,6 +544,9 @@ class FixWorker:
                         "environment setup changed the worktree HEAD"
                     )
                 restored = workspace.restore_working_changes(snapshots)
+                permissions = self._ensure_workspace_permissions(
+                    job, workspace, "environment_setup"
+                )
                 after = workspace.working_tree_fingerprint()
                 if after != before:
                     raise EnvironmentSetupError(
@@ -548,6 +563,10 @@ class FixWorker:
                         "attempt": attempt,
                         "commands": len(repository.setup_commands),
                         "restored_paths": list(restored),
+                        "permission_repairs": {
+                            "files": permissions.repaired_files,
+                            "directories": permissions.repaired_directories,
+                        },
                     },
                 )
                 return
@@ -581,6 +600,25 @@ class FixWorker:
                 raise EnvironmentSetupError(
                     "environment setup stopped before the next retry"
                 )
+
+    def _ensure_workspace_permissions(
+        self, job: Job, workspace: FixWorkspace, stage: str
+    ) -> PermissionSummary:
+        permissions = workspace.ensure_writable()
+        if permissions.repaired:
+            self._event(
+                job.id,
+                "worktree_permissions_repaired",
+                "관리 worktree 소유자 쓰기 권한 복구 완료",
+                {
+                    "stage": stage,
+                    "repaired_files": permissions.repaired_files,
+                    "repaired_directories": permissions.repaired_directories,
+                    "checked_files": permissions.checked_files,
+                    "checked_directories": permissions.checked_directories,
+                },
+            )
+        return permissions
 
     def _fix_until_valid(
         self,
@@ -619,6 +657,9 @@ class FixWorker:
             )
             tests: list[dict[str, object]] = []
             try:
+                self._ensure_workspace_permissions(
+                    job, workspace, f"fix_iteration_{iteration}_before_edit"
+                )
                 self.agent.apply_fix(
                     repository,
                     iteration_job,
@@ -638,6 +679,9 @@ class FixWorker:
                 )
                 self._prepare_environment(
                     repository, job, workspace, environment, setup_state
+                )
+                self._ensure_workspace_permissions(
+                    job, workspace, f"fix_iteration_{iteration}_before_harness"
                 )
                 summary = workspace.validate_diff()
                 self._event(

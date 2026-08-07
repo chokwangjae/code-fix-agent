@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import tempfile
 import threading
 
@@ -58,6 +59,19 @@ class _PathSnapshot:
     mode: int | None = None
 
 
+@dataclass(frozen=True)
+class PermissionSummary:
+    checked_files: int
+    checked_directories: int
+    repaired_files: int
+    repaired_directories: int
+    cache_root: str
+
+    @property
+    def repaired(self) -> bool:
+        return bool(self.repaired_files or self.repaired_directories)
+
+
 class FixWorkspace:
     def __init__(
         self,
@@ -79,6 +93,7 @@ class FixWorkspace:
         self.cleanup_complete: bool | None = None
         self._github_token_loaded = False
         self._github_token: str | None = None
+        self._cache_environment: dict[str, str] | None = None
 
     @property
     def safe_environment(self) -> dict[str, str]:
@@ -96,8 +111,52 @@ class FixWorkspace:
         )
         for name in _CREDENTIAL_ENVIRONMENT | credential_names | configured_names:
             environment.pop(name, None)
+        environment.update(self._runtime_cache_environment())
         environment["GIT_TERMINAL_PROMPT"] = "0"
         return environment
+
+    def _runtime_cache_environment(self) -> dict[str, str]:
+        if self._cache_environment is not None:
+            return self._cache_environment
+        cache_key = hashlib.sha256(self.repository.id.encode("utf-8")).hexdigest()[:16]
+        cache_root = self.state_dir / "runtime-cache" / cache_key
+        paths = {
+            "NPM_CONFIG_CACHE": cache_root / "npm",
+            "GRADLE_USER_HOME": cache_root / "gradle",
+            "PUB_CACHE": cache_root / "pub",
+            "PLAYWRIGHT_BROWSERS_PATH": cache_root / "playwright",
+            "CP_HOME_DIR": cache_root / "cocoapods",
+            "TMPDIR": self.root / "tmp",
+        }
+        for path in (cache_root, *paths.values()):
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._grant_owner_directory_access(path)
+        self._sync_gradle_init_scripts(paths["GRADLE_USER_HOME"])
+        self._cache_environment = {
+            name: str(path.resolve()) for name, path in paths.items()
+        }
+        return self._cache_environment
+
+    def _sync_gradle_init_scripts(self, gradle_home: Path) -> None:
+        source_root = Path.home() / ".gradle" / "init.d"
+        if not source_root.is_dir():
+            return
+        target_root = gradle_home / "init.d"
+        target_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._grant_owner_directory_access(target_root)
+        for source in source_root.iterdir():
+            if (
+                not source.is_file()
+                or source.is_symlink()
+                or source.suffix not in {".gradle", ".kts"}
+            ):
+                continue
+            target = target_root / source.name
+            if target.is_symlink():
+                target.unlink()
+            if not target.exists() or target.read_bytes() != source.read_bytes():
+                shutil.copyfile(source, target)
+            self._grant_owner_file_access(target)
 
     def create(self) -> None:
         with _repository_lock(self.repository.local_path):
@@ -133,6 +192,7 @@ class FixWorkspace:
                 timeout_seconds=self.repository.command_timeout_seconds,
             )
         self._created = True
+        permissions = self.ensure_writable()
         self._record_event(
             "worktree_created",
             "detached worktree created from the latest target branch",
@@ -143,6 +203,113 @@ class FixWorkspace:
                 "base_commit": self.base_commit,
             },
         )
+        self._record_event(
+            "worktree_permissions_ready",
+            "managed worktree and runtime cache permissions verified",
+            {
+                "checked_files": permissions.checked_files,
+                "checked_directories": permissions.checked_directories,
+                "repaired_files": permissions.repaired_files,
+                "repaired_directories": permissions.repaired_directories,
+                "cache_root": permissions.cache_root,
+            },
+        )
+
+    def ensure_writable(self) -> PermissionSummary:
+        if not self.path.is_dir():
+            raise FixAgentError(f"managed worktree does not exist: {self.path}")
+        files = tuple(
+            sorted(
+                file
+                for file in self.runner.run(
+                    [
+                        "git",
+                        "ls-files",
+                        "--cached",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                    ],
+                    cwd=self.path,
+                    environment=self.safe_environment,
+                ).stdout.split("\0")
+                if file
+            )
+        )
+        directories = {self.path}
+        regular_files: list[Path] = []
+        for file in files:
+            candidate = self.path / file
+            parent = candidate.parent
+            while parent != self.path:
+                directories.add(parent)
+                parent = parent.parent
+            if candidate.is_symlink() or not candidate.exists():
+                continue
+            if candidate.is_dir():
+                directories.add(candidate)
+                continue
+            if not candidate.is_file():
+                raise FixAgentError(
+                    f"managed worktree path is not a regular file: {file}"
+                )
+            regular_files.append(candidate)
+        git_file = self.path / ".git"
+        repaired_directories = sum(
+            self._grant_owner_directory_access(directory)
+            for directory in sorted(directories, key=lambda value: len(value.parts))
+        )
+        repaired_files = 0
+        if git_file.is_file():
+            repaired_files += self._grant_owner_file_access(git_file)
+        for candidate in regular_files:
+            repaired_files += self._grant_owner_file_access(candidate)
+        probe = self.path / f".fix-agent-write-probe-{os.getpid()}-{threading.get_ident()}"
+        try:
+            probe.write_text("writable\n", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise FixAgentError(
+                f"managed worktree is not writable: {self.path}: {exc}"
+            ) from exc
+        cache_root = Path(self.safe_environment["NPM_CONFIG_CACHE"]).parent
+        return PermissionSummary(
+            checked_files=len(regular_files) + int(git_file.is_file()),
+            checked_directories=len(directories),
+            repaired_files=repaired_files,
+            repaired_directories=repaired_directories,
+            cache_root=str(cache_root),
+        )
+
+    @staticmethod
+    def _grant_owner_directory_access(path: Path) -> int:
+        try:
+            current = stat.S_IMODE(path.stat().st_mode)
+            required = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+            desired = current | required
+            if desired != current:
+                path.chmod(desired)
+                return 1
+            if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+                raise FixAgentError(f"directory remains inaccessible: {path}")
+            return 0
+        except OSError as exc:
+            raise FixAgentError(f"cannot make directory writable: {path}: {exc}") from exc
+
+    @staticmethod
+    def _grant_owner_file_access(path: Path) -> int:
+        try:
+            current = stat.S_IMODE(path.stat().st_mode)
+            required = stat.S_IRUSR | stat.S_IWUSR
+            desired = current | required
+            if desired != current:
+                path.chmod(desired)
+                return 1
+            if not os.access(path, os.R_OK | os.W_OK):
+                raise FixAgentError(f"file remains inaccessible: {path}")
+            return 0
+        except OSError as exc:
+            raise FixAgentError(f"cannot make file writable: {path}: {exc}") from exc
 
     def _ensure_local_repository(self) -> None:
         path = self.repository.local_path
@@ -699,8 +866,13 @@ class FixWorkspace:
 
     def close(self) -> None:
         remove_returncode: int | None = None
+        permission_error: str | None = None
         with _repository_lock(self.repository.local_path):
             if self._created:
+                try:
+                    self.ensure_writable()
+                except FixAgentError as exc:
+                    permission_error = str(exc)
                 result = self.runner.run(
                     ["git", "worktree", "remove", "--force", str(self.path)],
                     cwd=self.repository.local_path,
@@ -734,6 +906,7 @@ class FixWorkspace:
                 "remove_returncode": remove_returncode,
                 "prune_returncode": prune_returncode,
                 "root_exists": self.root.exists(),
+                "permission_error": permission_error,
             },
         )
 

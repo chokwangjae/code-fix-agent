@@ -148,9 +148,26 @@ git worktree add --detach \
 
 이 시점에는 수정 branch를 만들지 않는다. 원래 checkout의 현재 branch와 작업 파일도 바꾸지 않는다. 생성 경로, remote, target branch와 base commit은 `worktree_created` event에 남긴다.
 
+생성 직후에는 Git이 추적하는 파일과 Git이 무시하지 않는 새 파일만 확인한다. 일반 파일에는 소유자 읽기·쓰기 권한을, 상위 디렉터리에는 소유자 읽기·쓰기·실행 권한을 보장한다. 기존 실행 bit는 유지하고 symlink 대상의 mode는 바꾸지 않는다. checkout root에 임시 파일을 만들었다가 지우는 쓰기 probe까지 통과해야 다음 단계로 간다. 검사 수, 보정 수와 cache 경로는 `worktree_permissions_ready` event에 남긴다.
+
+권한 변경 범위는 에이전트가 만든 `state_dir/worktrees/fix-*/checkout`과 `state_dir/runtime-cache`뿐이다. 원본 저장소 `local_path`, 다른 checkout, Git 공용 metadata와 사용자 홈의 권한은 바꾸지 않는다.
+
 ## 4. 환경 준비
 
 Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서대로 실행한다. 각 명령은 shell을 통하지 않는 argument 배열이며 Codex·하네스와 같은 비밀값 제거 환경을 사용한다. 한 명령이 실패하면 처음부터 다시 실행하며 `setup_max_attempts`와 `setup_retry_delay_seconds`로 횟수와 간격을 정한다.
+
+도구 cache는 저장소별 `state_dir/runtime-cache/<repository-key>` 아래에 둔다. 사용자 `HOME`은 그대로 유지한다.
+
+| 환경 변수 | 전용 경로 용도 |
+|---|---|
+| `NPM_CONFIG_CACHE` | npm package cache |
+| `GRADLE_USER_HOME` | Gradle cache와 wrapper |
+| `PUB_CACHE` | Dart·Flutter package cache |
+| `PLAYWRIGHT_BROWSERS_PATH` | Playwright browser binary |
+| `CP_HOME_DIR` | CocoaPods cache |
+| `TMPDIR` | finding worktree별 임시 파일 |
+
+각 경로에는 현재 실행 사용자만 접근할 수 있는 mode를 기본 적용한다. 기존 `~/.gradle/init.d`의 일반 `.gradle`·`.kts` script는 전용 Gradle home으로 복사해 로컬 container 같은 필수 초기화를 유지한다. symlink와 그 밖의 사용자 Gradle 설정은 복사하지 않는다.
 
 준비 전후의 tracked diff와 Git이 추적할 새 파일 내용을 비교한다. 설치 명령이 lockfile이나 프로젝트 파일을 바꾸면 실행 전 내용을 복원한다. Codex가 작업 중 바꾼 파일은 그 시점의 내용을 보관했다가 되돌리므로 의도한 수정은 유지한다. 복원 뒤 diff가 준비 전과 다르면 환경 준비 실패로 처리하며 push하지 않는다. `node_modules`, Gradle cache와 Playwright 사용자 cache처럼 `.gitignore` 또는 전역 cache에 있는 파일은 비교 대상에서 빠진다.
 
@@ -160,7 +177,7 @@ Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서�
 
 - `environment_setup_started`: 실행할 명령 수와 감시 경로
 - `environment_setup_failed`: 실패 명령, 종료 코드, 제한한 stdout·stderr와 다음 재시도 여부
-- `environment_setup_completed`: 성공한 시도, 명령 수와 복원한 Git 경로
+- `environment_setup_completed`: 성공한 시도, 명령 수, 복원한 Git 경로와 권한 보정 수
 
 ## 5. finding 검증과 수정
 
@@ -176,6 +193,8 @@ worktree 안에서 다음 단계를 실행한다.
 8. 경로·파일 수·line 수·symlink·binary 정책 검사
 9. 대상 저장소 하네스 실행
 10. read-only Codex의 수정 결과 검증과 사유 기록
+
+Codex 수정 직전, 환경 준비 명령 전후와 하네스 실행 직전에 worktree 권한을 다시 확인한다. 도구가 파일을 read-only로 바꿨으면 같은 worktree에서 소유자 권한을 복구하고 `worktree_permissions_repaired` event에 단계와 파일·디렉터리 수를 남긴다. 권한 확인이나 쓰기 probe가 실패하면 수정·commit·push를 진행하지 않는다.
 
 Codex와 테스트 환경에서는 GitHub token, 일반적인 token·secret·password와 webhook 환경 변수를 제거한다. Git network 명령에만 별도 인증 환경을 사용한다.
 
@@ -281,6 +300,8 @@ fetch와 push 사이에 원격이 이동해 non-fast-forward가 발생하면 최
 
 정상 완료, 오탐 거부, 정책 실패, 테스트 실패, merge 실패와 Python 예외 모두 context 종료 경로에서 worktree 정리를 시도한다.
 
+제거 직전에도 관리 worktree의 소유자 권한을 복구한다. 복구가 실패해도 `git worktree remove --force`와 prune은 시도하며, 오류는 정리 event의 `permission_error`에 남긴다.
+
 ```bash
 git worktree remove --force \
   .fix-agent/worktrees/fix-<random>/checkout
@@ -290,7 +311,7 @@ git worktree prune
 두 명령 사이에 `fix-<random>` 디렉터리도 재귀 삭제한다. 결과는 다음 event 중 하나로 남긴다.
 
 - `worktree_removed`: worktree 제거 명령 성공, 임시 root 삭제 확인
-- `worktree_cleanup_incomplete`: 제거 명령 실패 또는 임시 root 잔존
+- `worktree_cleanup_incomplete`: 제거 명령 실패 또는 임시 root 잔존, 발생한 권한 오류 포함
 
 PR 방식의 PR 생성은 worktree 제거 뒤에 실행한다. direct 방식은 worktree 제거 뒤 작업을 `completed`로 바꾼다. push 뒤 정리에 실패하면 기록된 관리 경로를 확인해 제거와 prune을 다음 시도에서 다시 실행한다. 이미 push한 commit은 다시 만들지 않는다. push된 원격 branch, SQLite 기록과 PR은 worktree 정리 대상이 아니다.
 

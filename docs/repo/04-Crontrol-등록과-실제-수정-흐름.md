@@ -102,8 +102,9 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 최신 target에서 detached worktree 생성
    - 원본 저장소 checkout과 다른 finding 작업과 분리
    - `worktree_created` event에 기준 commit과 경로 기록
+   - 관리 경로의 소유자 권한과 쓰기 가능 여부를 확인하고 `worktree_permissions_ready` event 기록
 4. 대상 저장소 환경 준비
-   - 저장소별 `setup_commands`로 worktree 의존성·브라우저·컨테이너 전제조건 준비
+   - 저장소별 전용 runtime cache와 `setup_commands`로 worktree 의존성·브라우저·컨테이너 전제조건 준비
    - 실패하면 같은 worktree에서 설정 횟수만큼 재시도
    - Crontrol에 `환경 준비 중`, `환경 준비 재시도 중`, `환경 준비 완료` 반영
    - 준비 명령과 결과를 `environment_setup_*` event에 기록
@@ -120,6 +121,8 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 수정 시작과 수정안 생성 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
 7. 정책·테스트·결과 검증
    - lockfile과 빌드 설정이 바뀌면 환경 준비 명령을 먼저 다시 실행
+   - Codex 수정 전, 환경 준비 명령 전후와 하네스 전에 권한 재확인
+   - 보정이 발생하면 event와 Crontrol에 `worktree 권한 복구 완료` 반영
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스 실행
    - read-only Codex가 원래 실패 경로 해소와 새 회귀 여부 재검증
@@ -141,7 +144,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - force push와 자동 merge 미사용
    - push 성공 commit, branch과 remote를 event log에 기록
 11. worktree 정리와 통지
-    - 성공, 오탐, 테스트 실패, 충돌 중단과 예외 모두 worktree 강제 제거 시도
+    - 성공, 오탐, 테스트 실패, 충돌 중단과 예외 모두 권한을 재확인한 뒤 worktree 강제 제거 시도
     - 임시 root 삭제와 `git worktree prune` 실행
     - Discord가 활성화됐으면 push·완료·실패 이벤트 전송
     - Crontrol에는 finding 내용 대신 현재 단계와 대기 건수, 최종 결과만 유지

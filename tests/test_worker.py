@@ -108,6 +108,12 @@ class RetryAgent(FakeAgent):
         super().apply_fix(repository, job, workspace, environment, workspace_base)
 
 
+class ReadOnlyFixAgent(FakeAgent):
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
+        super().apply_fix(repository, job, workspace, environment, workspace_base)
+        (workspace / job.file).chmod(0o400)
+
+
 class LocalWorker(FixWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -155,6 +161,28 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_repairs_permissions_changed_by_fix_before_harness(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(root, repository_path)
+            self._queue(config, baseline, target)
+            worker = LocalWorker(config, CommandRunner(), ReadOnlyFixAgent())
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                events = state.events(completed.id)
+
+        repairs = [
+            event
+            for event in events
+            if event.event_type == "worktree_permissions_repaired"
+        ]
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(len(repairs), 1)
+        self.assertIn('"repaired_files": 1', repairs[0].details_json)
+
     def test_retries_environment_setup_in_same_worktree_and_reuses_it(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
