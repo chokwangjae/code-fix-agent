@@ -54,6 +54,7 @@ curl http://127.0.0.1:7081/health
 - 정책 허용 경로 안의 신규 파일 추가와 기존 파일 삭제 허용
 - 파일 수와 변경 line 수 무제한
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
+- 검증된 diff와 대상 저장소 규칙에 맞는 commit type·scope·제목 생성
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
 - finding별 최신 target 기반 독립 detached worktree, 원격 이동 시 merge·재검증
 - 관리 worktree의 소유자 쓰기 권한 자동 보정과 단계별 재확인
@@ -107,7 +108,11 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 job, branch와 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
-severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 기존 diff와 실패 출력을 Codex에 전달해 보완한다. 모든 검증을 통과한 뒤 commit과 push를 실행하고 worktree를 제거한다. 프로세스 오류로 작업이 중단된 경우에만 `retry_delay_seconds` 뒤 최신 target에서 worktree를 다시 만든다.
+severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 기존 diff와 실패 출력을 Codex에 전달해 보완한다. 모든 검증을 통과한 뒤 commit과 push를 실행하고 worktree를 제거한다.
+
+프로세스를 재시작하면 `validating`, `fixing`, `testing`, `ready`, `pushed` 상태였던 job을 자동 복구한다. 재시작은 시도 횟수를 늘리지 않는다. 기록된 worktree가 남아 있으면 미커밋 diff와 생성된 commit을 포함한 현재 상태에서 수정을 이어가고, worktree가 없으면 최신 target에서 다시 시작한다. 복구 과정은 `restart_recovery_scheduled`, `worktree_resumed` event로 남는다.
+
+수정 결과를 검증하는 Codex는 같은 diff와 대상 저장소의 `AGENTS.md`를 근거로 commit 제목도 만든다. 변경 종류에 맞는 type과 실제 하위 시스템 scope를 고르고 변경된 동작을 제목에 적는다. fingerprint, `autofix`, `review finding`, `review issue`, `리뷰 이슈`처럼 수정 내용을 대신하는 표기는 거부한다. `commit_message_template`의 첫 줄에는 생성 제목을 넣고 나머지 본문은 설정값을 유지한다. 새 설정은 첫 줄에 `{title}`을 사용하며, `{title}`이 없는 기존 설정도 commit할 때 첫 줄을 생성 제목으로 교체한다.
 
 `setup_commands`는 새 worktree를 만든 뒤 Codex 검증보다 먼저 실행한다. 준비 명령이 실패하면 `setup_max_attempts`만큼 같은 worktree에서 재시도한다. `setup_watch_paths`에 지정한 lockfile이나 빌드 설정이 수정 또는 원격 merge로 바뀌면 하네스 전에 준비 명령을 다시 실행한다. 명령은 shell 문자열이 아닌 argument 배열로 지정한다. 설치 도구가 lockfile이나 프로젝트 파일을 다시 쓰면 실행 전 내용을 복원해 수정 diff와 분리한다.
 

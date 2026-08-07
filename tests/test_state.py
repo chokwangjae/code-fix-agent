@@ -112,6 +112,34 @@ class StateTest(unittest.TestCase):
 
         self.assertEqual(sorted(claimed), [1, 2, 3])
 
+    def test_restart_recovers_in_progress_job_without_using_retry_budget(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            parsed = parse_review_event(event())
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parsed)
+                first = state.claim_next(config.repositories)
+                state.record_precheck(first.id, True, "The failure is valid.")
+                state.mark_testing(first.id)
+                recovered = state.recover_interrupted_jobs()
+                interrupted = state.jobs(1)[0]
+                resumed = state.claim_next(config.repositories)
+                events = state.events(first.id)
+
+        self.assertEqual(recovered, (first.id,))
+        self.assertEqual(interrupted.status, "failed")
+        self.assertEqual(interrupted.attempts, 0)
+        self.assertEqual(resumed.id, first.id)
+        self.assertEqual(resumed.attempts, first.attempts)
+        self.assertIn("resume the recorded worktree", resumed.last_error)
+        self.assertIn(
+            "restart_recovery_scheduled",
+            [item.event_type for item in events],
+        )
+
     @staticmethod
     def _config() -> str:
         return """

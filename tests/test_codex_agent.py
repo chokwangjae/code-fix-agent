@@ -5,6 +5,7 @@ import unittest
 from fix_agent.codex_agent import CodexAgent
 from fix_agent.command import CommandResult
 from fix_agent.config import load_config
+from fix_agent.errors import FixAgentError
 from fakes import job
 
 
@@ -42,6 +43,38 @@ class CodexAgentTest(unittest.TestCase):
         command, options = runner.calls[0]
         self.assertIn("workspace-write", command)
         self.assertIn("Preserve the API.", options["input_text"])
+
+    def test_fix_validation_returns_diff_based_commit_title(self) -> None:
+        runner = FakeRunner(
+            '{"resolved":true,"reason":"Disabled references now block deletion.",'
+            '"commit_title":"fix(schedule): 비활성 스케줄의 실행 셋 삭제 차단"}'
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            decision = CodexAgent(runner, "/usr/bin/codex").validate_fix(
+                repository, job(), Path(directory), {"PATH": "/usr/bin"}
+            )
+
+        self.assertTrue(decision.valid)
+        self.assertEqual(
+            decision.commit_title,
+            "fix(schedule): 비활성 스케줄의 실행 셋 삭제 차단",
+        )
+        prompt = runner.calls[0][1]["input_text"]
+        self.assertIn("actual change", prompt)
+        self.assertIn("target repository's", prompt)
+
+    def test_fix_validation_rejects_generic_commit_title(self) -> None:
+        runner = FakeRunner(
+            '{"resolved":true,"reason":"The failure is fixed.",'
+            '"commit_title":"fix(autofix): 리뷰 이슈 500d70119f90 수정"}'
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            with self.assertRaisesRegex(FixAgentError, "generic review label"):
+                CodexAgent(runner, "/usr/bin/codex").validate_fix(
+                    repository, job(), Path(directory), {"PATH": "/usr/bin"}
+                )
 
     def test_retry_fix_receives_previous_failure_and_harness_output(self) -> None:
         runner = FakeRunner("")

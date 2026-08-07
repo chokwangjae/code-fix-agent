@@ -27,7 +27,11 @@ class FakeAgent:
     def validate_fix(
         self, repository, job, workspace, environment, workspace_base=None
     ):
-        return Decision(True, "The caller now receives the failure.")
+        return Decision(
+            True,
+            "The caller now receives the failure.",
+            "fix(worker): 실패 반환 경로 복구",
+        )
 
 
 class MovingTargetAgent(FakeAgent):
@@ -297,6 +301,13 @@ max_attempts = 1
                 capture_output=True,
                 text=True,
             ).stdout.strip()
+            title = subprocess.run(
+                ["git", "show", "-s", "--format=%s", completed.result_commit],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
         self.assertEqual(completed.status, "completed")
         self.assertIsNone(completed.pr_url)
         self.assertEqual(worker.pushed_branches, ["main"])
@@ -305,6 +316,7 @@ max_attempts = 1
         self.assertIn("worktree_removed", event_types)
         self.assertIn("push_completed", event_types)
         self.assertEqual(author, "broken-agent|g_uapm@inswave.com")
+        self.assertEqual(title, "fix(worker): 실패 반환 경로 복구")
 
     def test_merges_moved_target_and_revalidates_before_push(self) -> None:
         with TemporaryDirectory() as directory:

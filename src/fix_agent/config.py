@@ -289,12 +289,13 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
     if not isinstance(additional_instructions, str):
         raise FixAgentError(f"{context}.additional_instructions must be a string")
     commit_message_template = raw.get(
-        "commit_message_template", "fix: resolve review finding {fingerprint}"
+        "commit_message_template", "{title}"
     )
     if not isinstance(commit_message_template, str) or not commit_message_template.strip():
         raise FixAgentError(f"{context}.commit_message_template must be a string")
     try:
         commit_message_template.format(
+            title="fix(scope): 구체적인 동작 수정",
             fingerprint="sha256:" + "0" * 64,
             fingerprint_short="0" * 12,
             file="path/to/file",

@@ -28,11 +28,28 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.discord.webhook_url_env, "FIX_DISCORD_WEBHOOK_URL")
         self.assertEqual(repository.discord.timeout_seconds, 20)
         self.assertEqual(repository.additional_instructions, "Preserve the public API.")
+        self.assertEqual(repository.commit_message_template, "{title}")
         self.assertEqual(repository.git_author_name, "broken-agent")
         self.assertEqual(repository.git_author_email, "g_uapm@inswave.com")
         self.assertEqual(repository.policy.max_changed_files, 3)
         self.assertEqual(repository.policy.skip_reason("Critical", "src/a.py", "sha256:" + "a" * 64), "severity is not enabled: Critical")
         self.assertIsNotNone(repository.policy.skip_reason("Major", ".github/workflows/a.yml", "sha256:" + "a" * 64))
+
+    def test_accepts_generated_title_placeholder_in_commit_template(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'git_author_name = "broken-agent"',
+                'commit_message_template = "{title}\\n\\n검증: 완료"\n'
+                'git_author_name = "broken-agent"',
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+
+        self.assertEqual(
+            config.repositories[0].commit_message_template,
+            "{title}\n\n검증: 완료",
+        )
 
     def test_rejects_parent_path_policy(self) -> None:
         with TemporaryDirectory() as directory:

@@ -36,7 +36,7 @@ retry_delay_seconds = 30
 max_remote_merge_attempts = 3
 ```
 
-`max_attempts = 0`은 수정 대상으로 확정된 job을 완료할 때까지 횟수 제한 없이 보완한다. 양수는 최초 시도를 포함한 최대 횟수다. 정책·하네스·결과 검증 실패는 같은 worktree에서 바로 보완한다. 프로세스 오류로 작업이 끝난 경우에는 `retry_delay_seconds`만큼 기다린 뒤 같은 job을 먼저 처리하므로 뒤 job이 앞지르지 않는다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
+`max_attempts = 0`은 수정 대상으로 확정된 job을 완료할 때까지 횟수 제한 없이 보완한다. 양수는 최초 시도를 포함한 최대 횟수다. 정책·하네스·결과 검증 실패는 같은 worktree에서 바로 보완한다. 프로세스를 재시작하면 진행 중 job을 재시도 횟수 차감 없이 다시 대기열에 넣는다. 기록된 worktree가 남아 있으면 기존 diff와 commit을 보존한 채 같은 경로에서 이어가고, 경로가 없으면 최신 target에서 새 worktree를 만든다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
 
 `github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
 
@@ -200,7 +200,9 @@ Codex와 테스트 환경에서는 GitHub token, 일반적인 token·secret·pas
 
 ## 6. fix commit 생성
 
-초기 정책·테스트·수정 결과 검증을 통과하면 수정분을 commit한다.
+초기 정책·테스트·수정 결과 검증을 통과하면 수정분을 commit한다. read-only Codex는 수정 결과를 검증하면서 대상 저장소의 `AGENTS.md`와 실제 diff에 맞는 commit 제목을 함께 만든다. 제목의 type은 변경 종류, scope는 실제 하위 시스템, 설명은 달라진 동작을 나타내야 한다. fingerprint나 `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 표기는 거부한다.
+
+`commit_message_template`의 첫 줄은 Codex가 만든 제목으로 교체하고 설정된 본문은 유지한다. 새 template은 첫 줄에 `{title}`을 사용한다. `{title}`이 없는 기존 template도 같은 방식으로 첫 줄을 교체하므로 설정을 바로 마이그레이션하지 않아도 된다.
 
 `direct`에서는 detached HEAD 상태로 commit하므로 별도 local branch를 남기지 않는다.
 
@@ -209,7 +211,7 @@ git add --all
 git -c user.name="broken-agent" \
     -c user.email="g_uapm@inswave.com" \
     -c commit.gpgsign=false \
-    commit -m "<commit_message_template>"
+    commit -m "<생성된 제목과 commit_message_template 본문>"
 ```
 
 `pull_request`에서는 commit 전에 다음 branch를 만든다.
@@ -410,4 +412,4 @@ worktree_removed
 status_changed: completed
 ```
 
-정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 프로세스 밖으로 빠져나온 실행 오류만 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록하고 새 worktree에서 다시 시작한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.
+정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.

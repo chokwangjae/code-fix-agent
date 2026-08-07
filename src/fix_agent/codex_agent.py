@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shutil
 
 from .command import CommandRunner
@@ -15,6 +16,13 @@ from .state import Job
 class Decision:
     valid: bool
     reason: str
+    commit_title: str | None = None
+
+
+_GENERIC_COMMIT_TITLE = re.compile(
+    r"(?:\breview (?:finding|issue)\b|\bautofix\b|리뷰\s*이슈|fingerprint)",
+    re.IGNORECASE,
+)
 
 
 class CodexAgent:
@@ -117,13 +125,23 @@ Original cause: {job.cause}
 
 Inspect the working tree diff against {workspace_base or job.target_commit}. Read applicable
 AGENTS.md files and relevant callers and tests. Confirm that the original failure
-path is removed and that the diff introduces no concrete regression. Do not edit
-files. Return only JSON in this form:
+path is removed and that the diff introduces no concrete regression. If the fix is
+resolved, write a single-line commit title that follows the target repository's
+exact commit rules. Choose the type from the actual change, use a concrete subsystem
+scope when the repository requires one, and describe the changed behavior. Do not
+use the finding fingerprint, "autofix", "review finding", "review issue", or the
+agent identity in the title. Do not edit files. Return only JSON in this form:
 
-{{"resolved": true, "reason": "specific evidence for the decision"}}
+{{"resolved": true, "reason": "specific evidence for the decision", "commit_title": "type(scope): concrete changed behavior"}}
 """
         return self._decision(
-            repository, workspace, environment, "read-only", prompt, "resolved"
+            repository,
+            workspace,
+            environment,
+            "read-only",
+            prompt,
+            "resolved",
+            require_commit_title=True,
         )
 
     def resolve_merge_conflicts(
@@ -176,6 +194,7 @@ Return only JSON after editing:
         sandbox: str,
         prompt: str,
         key: str,
+        require_commit_title: bool = False,
     ) -> Decision:
         output = self._invoke(repository, workspace, environment, sandbox, prompt)
         text = output.strip()
@@ -192,7 +211,12 @@ Return only JSON after editing:
         reason = raw.get("reason") if isinstance(raw, dict) else None
         if not isinstance(value, bool) or not isinstance(reason, str) or not reason.strip():
             raise FixAgentError("Codex validation returned an invalid decision")
-        return Decision(value, reason.strip())
+        commit_title = raw.get("commit_title") if isinstance(raw, dict) else None
+        if require_commit_title and value:
+            commit_title = _validated_commit_title(commit_title)
+        elif commit_title is not None:
+            commit_title = _validated_commit_title(commit_title)
+        return Decision(value, reason.strip(), commit_title)
 
     def _invoke(
         self,
@@ -230,6 +254,21 @@ Return only JSON after editing:
         if not result.stdout.strip() and sandbox == "read-only":
             raise FixAgentError("Codex validation produced no output")
         return result.stdout
+
+
+def _validated_commit_title(raw: object) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise FixAgentError("Codex validation returned no commit title")
+    title = raw.strip()
+    if "\n" in title or "\r" in title:
+        raise FixAgentError("Codex commit title must be a single line")
+    if len(title) > 200:
+        raise FixAgentError("Codex commit title is longer than 200 characters")
+    if any(ord(character) < 32 for character in title):
+        raise FixAgentError("Codex commit title contains a control character")
+    if _GENERIC_COMMIT_TITLE.search(title):
+        raise FixAgentError("Codex commit title uses a generic review label")
+    return title
 
 
 def _retry_context(job: Job) -> str:

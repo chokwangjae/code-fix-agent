@@ -451,6 +451,99 @@ class StateStore:
             raise
         return Job(**dict(claimed)) if claimed is not None else None
 
+    def recover_interrupted_jobs(self) -> tuple[int, ...]:
+        now = _now()
+        recovered: list[int] = []
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            rows = self.connection.execute(
+                """
+                SELECT id, status, attempts, last_error
+                FROM jobs
+                WHERE status IN ('validating', 'fixing', 'testing', 'ready', 'pushed')
+                ORDER BY id
+                """
+            ).fetchall()
+            for row in rows:
+                previous_status = row["status"]
+                interruption = (
+                    f"process restarted while job was {previous_status}; "
+                    "resume the recorded worktree"
+                )
+                previous_error = row["last_error"]
+                error = (
+                    f"{interruption}\nPrevious error: {previous_error}"
+                    if previous_error
+                    else interruption
+                )
+                self.connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed', attempts = CASE
+                            WHEN attempts > 0 THEN attempts - 1
+                            ELSE 0
+                        END,
+                        last_error = ?, next_attempt_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (error[:20_000], now, now, row["id"]),
+                )
+                self._insert_event(
+                    row["id"],
+                    "restart_recovery_scheduled",
+                    "interrupted job will resume from its recorded worktree",
+                    {
+                        "previous_status": previous_status,
+                        "attempt_preserved": row["attempts"],
+                    },
+                    status="failed",
+                )
+                recovered.append(row["id"])
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return tuple(recovered)
+
+    def resumable_worktree(self, job_id: int) -> tuple[str, str] | None:
+        row = self.connection.execute(
+            """
+            SELECT id, details_json
+            FROM job_events
+            WHERE job_id = ? AND event_type = 'worktree_created'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        removed = self.connection.execute(
+            """
+            SELECT id
+            FROM job_events
+            WHERE job_id = ? AND event_type = 'worktree_removed'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()
+        if removed is not None and removed["id"] > row["id"]:
+            return None
+        try:
+            details = json.loads(row["details_json"])
+        except json.JSONDecodeError:
+            return None
+        path = details.get("path") if isinstance(details, dict) else None
+        base_commit = details.get("base_commit") if isinstance(details, dict) else None
+        if not isinstance(path, str) or not path:
+            return None
+        if not isinstance(base_commit, str) or not base_commit:
+            return None
+        if not Path(path).is_dir():
+            return None
+        return path, base_commit
+
     def record_precheck(self, job_id: int, valid: bool, reason: str) -> None:
         self._update(
             job_id,

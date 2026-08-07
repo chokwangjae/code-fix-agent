@@ -31,7 +31,12 @@ publish_mode = "direct"
 # github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []
 additional_instructions = ""
-commit_message_template = "fix: resolve review finding {fingerprint_short}"
+commit_message_template = """{title}
+
+무엇: 검증된 리뷰 이슈 수정
+왜: 독립 사실 검증을 통과한 결함 해소
+동기화: 변경 영역의 코드·테스트·문서 동기화
+검증: 저장소 하네스 검증"""
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
 setup_commands = [

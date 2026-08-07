@@ -126,10 +126,13 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스 실행
    - read-only Codex가 원래 실패 경로 해소와 새 회귀 여부 재검증
+   - 같은 diff와 대상 `AGENTS.md`를 근거로 변경 type·scope·동작을 담은 commit 제목 생성
+   - fingerprint, `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 제목 거부
    - 결과와 근거를 `postcheck_status`, `postcheck_reason`에 기록
    - Crontrol 단계를 정책 검증, 테스트, 수정 결과 검증 순서로 갱신
 8. commit 생성과 원격 재확인
    - finding 하나의 검증된 diff를 commit 하나로 생성
+   - 생성 제목을 `commit_message_template` 첫 줄에 적용하고 설정된 본문 유지
    - push 직전 `remote/target_branch`를 다시 fetch
    - 원격 target이 같으면 push 단계로 이동
 9. target 이동과 충돌 처리
@@ -153,7 +156,9 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
     - `max_attempts = 0`이면 같은 worktree에서 횟수 제한 없이 보완
     - 처음 통과한 finding 사실 판정과 사유 유지
     - 기존 diff와 이전 실패 내용을 Codex 수정 입력에 포함
-    - 프로세스 오류로 worktree를 유지하지 못한 경우에만 `retry_delay_seconds` 뒤 최신 target에서 재시작
+    - 프로세스 재시작 시 진행 중 job의 재시도 횟수를 보존하고 다시 대기열에 등록
+    - 기록된 worktree가 남아 있으면 기존 diff와 commit에서 재개
+    - worktree를 유지하지 못한 경우 최신 target에서 재시작
     - push 뒤 정리만 실패했다면 기록된 worktree 제거와 prune만 재실행
     - push와 worktree 정리가 끝난 뒤 `completed`로 전환
 

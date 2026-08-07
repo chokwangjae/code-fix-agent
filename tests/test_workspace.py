@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import os
 import stat
@@ -15,6 +16,86 @@ from fakes import job
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_resumes_recorded_worktree_with_existing_changes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path, publish_mode="direct")
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            interrupted = FixWorkspace(
+                CommandRunner(),
+                config.repositories[0],
+                work_job,
+                config.state_dir,
+            )
+            interrupted.create()
+            (interrupted.path / "src/app.py").write_text(
+                "partially fixed\n", encoding="utf-8"
+            )
+            recorded = (str(interrupted.path), interrupted.base_commit)
+
+            with FixWorkspace(
+                CommandRunner(),
+                config.repositories[0],
+                work_job,
+                config.state_dir,
+                resumable_worktree=recorded,
+            ) as resumed:
+                self.assertEqual(resumed.path, interrupted.path)
+                self.assertEqual(
+                    (resumed.path / "src/app.py").read_text(encoding="utf-8"),
+                    "partially fixed\n",
+                )
+                self.assertEqual(resumed.validate_diff().files, ("src/app.py",))
+
+            self.assertFalse(interrupted.root.exists())
+
+    def test_commit_replaces_static_template_title_and_preserves_body(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path, publish_mode="direct")
+            repository = replace(
+                config.repositories[0],
+                commit_message_template=(
+                    "fix(autofix): 리뷰 이슈 {fingerprint_short} 수정\n\n"
+                    "무엇: 검증된 수정"
+                ),
+            )
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            with FixWorkspace(
+                CommandRunner(), repository, work_job, config.state_dir
+            ) as workspace:
+                (workspace.path / "src/app.py").write_text(
+                    "fixed\n", encoding="utf-8"
+                )
+                _, commit = workspace.commit(
+                    "fix(schedule): 비활성 스케줄의 실행 셋 삭제 차단"
+                )
+                message = subprocess.run(
+                    ["git", "show", "-s", "--format=%B", commit],
+                    cwd=workspace.path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+        self.assertEqual(
+            message,
+            "fix(schedule): 비활성 스케줄의 실행 셋 삭제 차단\n\n"
+            "무엇: 검증된 수정",
+        )
+
     def test_verifies_claim_and_enforces_diff_policy(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

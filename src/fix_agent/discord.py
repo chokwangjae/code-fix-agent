@@ -17,6 +17,7 @@ _NOTIFIABLE_EVENTS = {
     "fix_started",
     "fix_applied",
     "fix_iteration_failed",
+    "restart_recovery_scheduled",
     "retry_scheduled",
     "target_moved",
     "merge_conflict_detected",
@@ -90,6 +91,8 @@ def _presentation(event: JobEvent) -> tuple[str, int]:
         return "🛠️ 코드 수정안 생성 완료", INFO_COLOR
     if event.event_type == "fix_iteration_failed":
         return "🔄 코드 수정 보완 계속", WARNING_COLOR
+    if event.event_type == "restart_recovery_scheduled":
+        return "🔄 코드 수정 재시작 복구", WARNING_COLOR
     if event.event_type == "retry_scheduled":
         return "🔄 코드 수정 재시도 예정", WARNING_COLOR
     if event.event_type == "target_moved":

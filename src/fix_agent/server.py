@@ -42,6 +42,13 @@ def serve(config: AppConfig) -> None:
         config.server.token, config.server.token_env, "server token"
     )
     application = IntakeApplication(config)
+    with StateStore(config.state_dir) as state:
+        recovered_jobs = state.recover_interrupted_jobs()
+    if recovered_jobs:
+        print(
+            "scheduled interrupted job recovery: "
+            + ", ".join(str(job_id) for job_id in recovered_jobs)
+        )
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "code-fix-agent/0.1"

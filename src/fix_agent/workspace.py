@@ -79,6 +79,8 @@ class FixWorkspace:
         repository: RepositoryConfig,
         job: Job,
         state_dir: Path,
+        *,
+        resumable_worktree: tuple[str, str] | None = None,
     ) -> None:
         self.runner = runner
         self.repository = repository
@@ -86,14 +88,68 @@ class FixWorkspace:
         self.state_dir = state_dir
         worktrees = state_dir / "worktrees"
         worktrees.mkdir(parents=True, exist_ok=True)
-        self.root = Path(tempfile.mkdtemp(prefix="fix-", dir=worktrees))
-        self.path = self.root / "checkout"
+        self._resumable_worktree = resumable_worktree
+        if resumable_worktree is None:
+            self.root = Path(tempfile.mkdtemp(prefix="fix-", dir=worktrees))
+            self.path = self.root / "checkout"
+        else:
+            self.path = Path(resumable_worktree[0]).resolve()
+            self.root = self.path.parent
         self._created = False
         self.base_commit: str | None = None
         self.cleanup_complete: bool | None = None
         self._github_token_loaded = False
         self._github_token: str | None = None
         self._cache_environment: dict[str, str] | None = None
+
+    def resume(self) -> None:
+        if self._resumable_worktree is None:
+            raise FixAgentError("no recorded worktree is available to resume")
+        worktree_root = (self.state_dir / "worktrees").resolve()
+        recorded_path, recorded_base = self._resumable_worktree
+        path = Path(recorded_path).resolve()
+        if (
+            path != self.path
+            or path.name != "checkout"
+            or not path.is_relative_to(worktree_root)
+            or not path.parent.name.startswith("fix-")
+        ):
+            raise FixAgentError("recorded worktree path is outside the managed root")
+        if not path.is_dir() or not (path / ".git").is_file():
+            raise FixAgentError(f"recorded worktree does not exist: {path}")
+        with _repository_lock(self.repository.local_path):
+            self._ensure_local_repository()
+            listed = self.runner.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=self.repository.local_path,
+                environment=self.safe_environment,
+            )
+            if not any(
+                line == f"worktree {path}" for line in listed.stdout.splitlines()
+            ):
+                raise FixAgentError("recorded worktree is not registered")
+            current_target = self.fetch_target_head()
+            merge_base = self.runner.run(
+                ["git", "merge-base", "HEAD", current_target],
+                cwd=path,
+                environment=self.safe_environment,
+            ).stdout.strip().lower()
+        self._created = True
+        self.base_commit = merge_base or recorded_base.lower()
+        permissions = self.ensure_writable()
+        self._record_event(
+            "worktree_resumed",
+            "recorded worktree and its existing changes were resumed",
+            {
+                "path": str(path),
+                "recorded_base_commit": recorded_base,
+                "base_commit": self.base_commit,
+                "checked_files": permissions.checked_files,
+                "checked_directories": permissions.checked_directories,
+                "repaired_files": permissions.repaired_files,
+                "repaired_directories": permissions.repaired_directories,
+            },
+        )
 
     @property
     def safe_environment(self) -> dict[str, str]:
@@ -614,7 +670,7 @@ class FixWorkspace:
         )
         return DiffSummary(files, added, deleted)
 
-    def commit(self) -> tuple[str, str]:
+    def commit(self, title: str) -> tuple[str, str]:
         digest = self.job.fingerprint.removeprefix("sha256:")
         if self.repository.publish_mode == "pull_request":
             branch = f"autofix/{self.repository.id}/{digest[:12]}"
@@ -626,10 +682,13 @@ class FixWorkspace:
             environment=self.safe_environment,
         )
         message = self.repository.commit_message_template.format(
+            title=title,
             fingerprint=self.job.fingerprint,
             fingerprint_short=digest[:12],
             file=self.job.file,
         )
+        _, separator, body = message.partition("\n")
+        message = title + (separator + body if separator else "")
         if self.repository.publish_mode == "pull_request":
             self.runner.run(
                 ["git", "switch", "-c", branch],
@@ -922,9 +981,13 @@ class FixWorkspace:
 
     def __enter__(self) -> FixWorkspace:
         try:
-            self.create()
+            if self._resumable_worktree is None:
+                self.create()
+            else:
+                self.resume()
         except BaseException:
-            self.close()
+            if self._resumable_worktree is None:
+                self.close()
             raise
         return self
 

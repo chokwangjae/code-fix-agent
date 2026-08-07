@@ -194,8 +194,14 @@ class FixWorker:
                 state.mark_completed(job.id, pr_url)
             return
 
+        with StateStore(self.config.state_dir) as state:
+            resumable_worktree = state.resumable_worktree(job.id)
         with FixWorkspace(
-            self.runner, repository, job, self.config.state_dir
+            self.runner,
+            repository,
+            job,
+            self.config.state_dir,
+            resumable_worktree=resumable_worktree,
         ) as workspace:
             environment = workspace.safe_environment
             setup_state = _SetupState()
@@ -255,12 +261,18 @@ class FixWorker:
             summary, tests, postcheck = self._fix_until_valid(
                 repository, job, workspace, environment, setup_state
             )
-            branch, commit = workspace.commit()
+            if postcheck.commit_title is None:
+                raise FixAgentError("fix validation returned no commit title")
+            branch, commit = workspace.commit(postcheck.commit_title)
             self._event(
                 job.id,
                 "fix_committed",
                 "validated fix was committed in the worktree",
-                {"branch": branch, "commit": commit},
+                {
+                    "branch": branch,
+                    "commit": commit,
+                    "title": postcheck.commit_title,
+                },
             )
             remote_merges = 0
             while True:
