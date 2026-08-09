@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
+import uuid
 
 from .config import RepositoryConfig
 from .contract import ReviewEvent
@@ -37,6 +38,8 @@ class Job:
     fix_branch: str | None
     result_commit: str | None
     pr_url: str | None
+    batch_id: str | None
+    fallback_finding: int
     created_at: str
     updated_at: str
 
@@ -47,6 +50,35 @@ class IntakeResult:
     created: int
     duplicate: int
     skipped: int
+    batch_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchClaim:
+    id: str
+    jobs: tuple[Job, ...]
+    attempt: int
+
+
+@dataclass(frozen=True)
+class BatchRun:
+    id: str
+    repository_id: str
+    status: str
+    attempts: int
+    codex_calls: int
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+    total_tokens: int
+    duration_ms: int
+    last_error: str | None
+    started_at: str | None
+    completed_at: str | None
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -109,6 +141,8 @@ class StateStore:
                 fix_branch TEXT,
                 result_commit TEXT,
                 pr_url TEXT,
+                batch_id TEXT,
+                fallback_finding INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (repository, branch, fingerprint)
@@ -124,6 +158,29 @@ class StateStore:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 next_attempt_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_runs (
+                id TEXT PRIMARY KEY,
+                repository_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                codex_calls INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
@@ -158,15 +215,23 @@ class StateStore:
             ("postcheck_reason", "TEXT"),
             ("tests_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("next_attempt_at", "TEXT"),
+            ("batch_id", "TEXT"),
+            ("fallback_finding", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in columns:
                 self.connection.execute(
                     f"ALTER TABLE jobs ADD COLUMN {name} {declaration}"
                 )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS jobs_batch_id ON jobs (batch_id, id)"
+        )
         self.connection.commit()
 
     def accept(self, repository: RepositoryConfig, event: ReviewEvent) -> IntakeResult:
         now = datetime.now(timezone.utc).isoformat()
+        batch_id = (
+            uuid.uuid4().hex if repository.processing_mode == "review_batch" else None
+        )
         created = duplicate = skipped = 0
         job_ids: list[int] = []
         with self.connection:
@@ -181,8 +246,8 @@ class StateStore:
                         repository_id, repository, branch, baseline_commit,
                         target_commit, fingerprint, severity, introducing_commit,
                         file, line, cause, solution, status, last_error,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        batch_id, fallback_finding, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     ON CONFLICT (repository, branch, fingerprint) DO NOTHING
                     """,
                     (
@@ -200,6 +265,7 @@ class StateStore:
                         finding.solution,
                         status,
                         reason,
+                        batch_id,
                         now,
                         now,
                     ),
@@ -234,13 +300,31 @@ class StateStore:
                         )
                 if row is not None:
                     job_ids.append(row["id"])
-        return IntakeResult(tuple(job_ids), created, duplicate, skipped)
+            if batch_id is not None and created:
+                status = "completed" if created == skipped else "queued"
+                self.connection.execute(
+                    """
+                    INSERT INTO batch_runs (
+                        id, repository_id, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (batch_id, repository.id, status, now, now),
+                )
+        return IntakeResult(
+            tuple(job_ids), created, duplicate, skipped, batch_id if created else None
+        )
 
     def jobs(self, limit: int = 100) -> tuple[Job, ...]:
         rows = self.connection.execute(
             "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return tuple(Job(**dict(row)) for row in rows)
+
+    def job(self, job_id: int) -> Job | None:
+        row = self.connection.execute(
+            "SELECT * FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return Job(**dict(row)) if row is not None else None
 
     def events(
         self, job_id: int | None = None, after_id: int = 0, limit: int = 500
@@ -395,7 +479,7 @@ class StateStore:
         return self.discord_cursor(repository_id)
 
     def claim_next(self, repositories: tuple[RepositoryConfig, ...]) -> Job | None:
-        limits = {repository.id: repository.max_attempts for repository in repositories}
+        settings = {repository.id: repository for repository in repositories}
         now = _now()
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -412,10 +496,15 @@ class StateStore:
                 (
                     value
                     for value in rows
-                    if value["repository_id"] in limits
+                    if value["repository_id"] in settings
                     and (
-                        limits[value["repository_id"]] == 0
-                        or value["attempts"] < limits[value["repository_id"]]
+                        settings[value["repository_id"]].processing_mode == "finding"
+                        or bool(value["fallback_finding"])
+                    )
+                    and (
+                        settings[value["repository_id"]].max_attempts == 0
+                        or value["attempts"]
+                        < settings[value["repository_id"]].max_attempts
                     )
                 ),
                 None,
@@ -450,6 +539,188 @@ class StateStore:
             self.connection.rollback()
             raise
         return Job(**dict(claimed)) if claimed is not None else None
+
+    def claim_next_batch(
+        self, repositories: tuple[RepositoryConfig, ...]
+    ) -> BatchClaim | None:
+        settings = {repository.id: repository for repository in repositories}
+        now = _now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            rows = self.connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE batch_id IS NOT NULL
+                  AND fallback_finding = 0
+                  AND status IN ('queued', 'failed')
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY id
+                """,
+                (now,),
+            ).fetchall()
+            first = next(
+                (
+                    row
+                    for row in rows
+                    if row["repository_id"] in settings
+                    and settings[row["repository_id"]].processing_mode
+                    == "review_batch"
+                    and (
+                        settings[row["repository_id"]].max_attempts == 0
+                        or row["attempts"]
+                        < settings[row["repository_id"]].max_attempts
+                    )
+                ),
+                None,
+            )
+            if first is None:
+                self.connection.commit()
+                return None
+            batch_id = first["batch_id"]
+            batch_rows = [row for row in rows if row["batch_id"] == batch_id]
+            claimed_ids = [row["id"] for row in batch_rows]
+            placeholders = ",".join("?" for _ in claimed_ids)
+            cursor = self.connection.execute(
+                f"""
+                UPDATE jobs
+                SET status = 'validating', attempts = attempts + 1,
+                    next_attempt_at = NULL, updated_at = ?
+                WHERE id IN ({placeholders})
+                  AND status IN ('queued', 'failed')
+                """,
+                (now, *claimed_ids),
+            )
+            if cursor.rowcount != len(claimed_ids):
+                self.connection.rollback()
+                return None
+            attempt = max(int(row["attempts"]) + 1 for row in batch_rows)
+            self.connection.execute(
+                """
+                UPDATE batch_runs
+                SET status = 'processing', attempts = attempts + 1,
+                    started_at = COALESCE(started_at, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, batch_id),
+            )
+            for row in batch_rows:
+                self._insert_event(
+                    row["id"],
+                    "batch_claimed",
+                    "worker claimed the review batch",
+                    {
+                        "batch_id": batch_id,
+                        "batch_size": len(batch_rows),
+                        "attempt": int(row["attempts"]) + 1,
+                    },
+                    status="validating",
+                )
+            claimed = self.connection.execute(
+                f"SELECT * FROM jobs WHERE id IN ({placeholders}) ORDER BY id",
+                claimed_ids,
+            ).fetchall()
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return BatchClaim(
+            str(batch_id), tuple(Job(**dict(row)) for row in claimed), attempt
+        )
+
+    def batch_run(self, batch_id: str) -> BatchRun | None:
+        row = self.connection.execute(
+            "SELECT * FROM batch_runs WHERE id = ?", (batch_id,)
+        ).fetchone()
+        return BatchRun(**dict(row)) if row is not None else None
+
+    def record_batch_metrics(
+        self,
+        batch_id: str,
+        *,
+        codex_calls: int,
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+        total_tokens: int,
+        duration_ms: int,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE batch_runs
+                SET codex_calls = codex_calls + ?,
+                    input_tokens = input_tokens + ?,
+                    cached_input_tokens = cached_input_tokens + ?,
+                    cache_write_input_tokens = cache_write_input_tokens + ?,
+                    output_tokens = output_tokens + ?,
+                    reasoning_output_tokens = reasoning_output_tokens + ?,
+                    total_tokens = total_tokens + ?,
+                    duration_ms = duration_ms + ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    codex_calls,
+                    input_tokens,
+                    cached_input_tokens,
+                    cache_write_input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens,
+                    total_tokens,
+                    duration_ms,
+                    _now(),
+                    batch_id,
+                ),
+            )
+
+    def mark_batch_failed(self, batch_id: str, error: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE batch_runs
+                SET status = 'failed', last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (error[:20_000], _now(), batch_id),
+            )
+
+    def mark_batch_completed(self, batch_id: str) -> None:
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE batch_runs
+                SET status = 'completed', last_error = NULL,
+                    completed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, batch_id),
+            )
+
+    def mark_finding_fallback(self, job_ids: tuple[int, ...], reason: str) -> None:
+        if not job_ids:
+            return
+        placeholders = ",".join("?" for _ in job_ids)
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                f"""
+                UPDATE jobs
+                SET fallback_finding = 1, status = 'queued', attempts = 0,
+                    last_error = ?, next_attempt_at = NULL, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (reason[:20_000], now, *job_ids),
+            )
+            for job_id in job_ids:
+                self._insert_event(
+                    job_id,
+                    "batch_finding_fallback",
+                    "repeated batch failure isolated the finding",
+                    {"reason": reason[:4_000]},
+                    status="queued",
+                )
 
     def recover_interrupted_jobs(self) -> tuple[int, ...]:
         now = _now()
@@ -543,6 +814,23 @@ class StateStore:
         if not Path(path).is_dir():
             return None
         return path, base_commit
+
+    def resumable_batch_worktree(self, batch_id: str) -> tuple[str, str] | None:
+        rows = self.connection.execute(
+            """
+            SELECT event.job_id
+            FROM job_events AS event
+            JOIN jobs AS job ON job.id = event.job_id
+            WHERE job.batch_id = ? AND event.event_type = 'worktree_created'
+            ORDER BY event.id DESC
+            """,
+            (batch_id,),
+        ).fetchall()
+        for row in rows:
+            resumable = self.resumable_worktree(int(row["job_id"]))
+            if resumable is not None:
+                return resumable
+        return None
 
     def record_precheck(self, job_id: int, valid: bool, reason: str) -> None:
         self._update(

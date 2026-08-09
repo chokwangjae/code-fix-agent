@@ -34,6 +34,7 @@ class IntakeApplication:
             "created": result.created,
             "duplicate": result.duplicate,
             "skipped": result.skipped,
+            "batch_id": result.batch_id,
         }
 
 

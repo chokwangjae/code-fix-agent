@@ -10,6 +10,79 @@ from test_contract import event
 
 
 class StateTest(unittest.TestCase):
+    def test_claims_review_event_as_one_batch_and_records_metrics(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                    'publish_mode = "direct"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            value = event()
+            value["findings"].append(
+                {
+                    **value["findings"][0],
+                    "fingerprint": "sha256:" + "d" * 64,
+                }
+            )
+            with StateStore(config.state_dir) as state:
+                intake = state.accept(
+                    config.repositories[0], parse_review_event(value)
+                )
+                batch = state.claim_next_batch(config.repositories)
+                state.record_batch_metrics(
+                    batch.id,
+                    codex_calls=2,
+                    input_tokens=30,
+                    cached_input_tokens=10,
+                    cache_write_input_tokens=0,
+                    output_tokens=5,
+                    reasoning_output_tokens=0,
+                    total_tokens=35,
+                    duration_ms=250,
+                )
+                run = state.batch_run(batch.id)
+                finding_claim = state.claim_next(config.repositories)
+
+        self.assertEqual(batch.id, intake.batch_id)
+        self.assertEqual(len(batch.jobs), 2)
+        self.assertEqual(run.status, "processing")
+        self.assertEqual(run.codex_calls, 2)
+        self.assertEqual(run.total_tokens, 35)
+        self.assertIsNone(finding_claim)
+
+    def test_routes_isolated_batch_finding_through_finding_claim(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                    'publish_mode = "direct"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                batch = state.claim_next_batch(config.repositories)
+                state.mark_finding_fallback(
+                    (batch.jobs[0].id,), "repeated harness failure"
+                )
+                isolated = state.claim_next(config.repositories)
+
+        self.assertEqual(isolated.id, batch.jobs[0].id)
+        self.assertEqual(isolated.fallback_finding, 1)
+        self.assertEqual(isolated.attempts, 1)
+
     def test_accepts_once_and_deduplicates_by_fingerprint(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

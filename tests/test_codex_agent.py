@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import json
 
 from fix_agent.codex_agent import CodexAgent
 from fix_agent.command import CommandResult
@@ -20,6 +21,91 @@ class FakeRunner:
 
 
 class CodexAgentTest(unittest.TestCase):
+    def test_batch_jsonl_records_usage_and_preserves_finding_reasons(self) -> None:
+        fingerprint = "sha256:" + "c" * 64
+        message = json.dumps(
+            {
+                "findings": [
+                    {
+                        "fingerprint": fingerprint,
+                        "valid": True,
+                        "reason": "caller reaches the failing branch",
+                    }
+                ]
+            }
+        )
+        runner = FakeRunner(
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": message},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 90,
+                                "cached_input_tokens": 50,
+                                "output_tokens": 10,
+                                "total_tokens": 100,
+                            },
+                        }
+                    ),
+                )
+            )
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            agent = CodexAgent(runner, "/usr/bin/codex")
+            decisions = agent.validate_findings(
+                repository,
+                (job(fingerprint=fingerprint),),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+                "b" * 40,
+            )
+            metrics = agent.take_batch_metrics()
+
+        self.assertTrue(decisions[0].valid)
+        self.assertEqual(decisions[0].reason, "caller reaches the failing branch")
+        self.assertEqual(metrics.calls, 1)
+        self.assertEqual(metrics.cached_input_tokens, 50)
+        self.assertEqual(metrics.total_tokens, 100)
+        self.assertIn("--json", runner.calls[0][0])
+
+    def test_batch_groups_reject_split_findings_for_the_same_file(self) -> None:
+        first = job(fingerprint="sha256:" + "c" * 64)
+        second = job(id=2, fingerprint="sha256:" + "d" * 64)
+        runner = FakeRunner(
+            json.dumps(
+                {
+                    "groups": [
+                        {
+                            "fingerprints": [first.fingerprint],
+                            "files": [first.file],
+                        },
+                        {
+                            "fingerprints": [second.fingerprint],
+                            "files": [second.file],
+                        },
+                    ]
+                }
+            )
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            with self.assertRaisesRegex(FixAgentError, "overlapping groups"):
+                CodexAgent(runner, "/usr/bin/codex").apply_batch_fixes(
+                    repository,
+                    (first, second),
+                    Path(directory),
+                    {"PATH": "/usr/bin"},
+                    "b" * 40,
+                )
+
     def test_records_specific_independent_validation_reason(self) -> None:
         runner = FakeRunner('{"valid":true,"reason":"Caller drops exit 1."}')
         with TemporaryDirectory() as directory:

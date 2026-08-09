@@ -72,6 +72,14 @@ class PermissionSummary:
         return bool(self.repaired_files or self.repaired_directories)
 
 
+@dataclass(frozen=True)
+class FindingCommit:
+    fingerprints: tuple[str, ...]
+    files: tuple[str, ...]
+    title: str
+    commit: str
+
+
 class FixWorkspace:
     def __init__(
         self,
@@ -395,14 +403,15 @@ class FixWorkspace:
             timeout_seconds=self.repository.command_timeout_seconds,
         )
 
-    def finding_mismatch_reason(self) -> str | None:
+    def finding_mismatch_reason(self, job: Job | None = None) -> str | None:
+        job = job or self.job
         ancestry = self.runner.run(
             [
                 "git",
                 "merge-base",
                 "--is-ancestor",
-                self.job.introducing_commit,
-                self.job.target_commit,
+                job.introducing_commit,
+                job.target_commit,
             ],
             cwd=self.path,
             environment=self.safe_environment,
@@ -419,14 +428,14 @@ class FixWorkspace:
                 "--no-commit-id",
                 "--name-only",
                 "-r",
-                self.job.introducing_commit,
+                job.introducing_commit,
                 "--",
-                self.job.file,
+                job.file,
             ],
             cwd=self.path,
             environment=self.safe_environment,
         ).stdout.splitlines()
-        if self.job.file not in commit_files:
+        if job.file not in commit_files:
             return "introducing commit does not change the finding file"
         diff = self.runner.run(
             [
@@ -434,10 +443,10 @@ class FixWorkspace:
                 "diff",
                 "--unified=0",
                 "--no-color",
-                self.job.baseline_commit,
-                self.job.target_commit,
+                job.baseline_commit,
+                job.target_commit,
                 "--",
-                self.job.file,
+                job.file,
             ],
             cwd=self.path,
             environment=self.safe_environment,
@@ -449,7 +458,7 @@ class FixWorkspace:
                 start = int(match.group(1))
                 length = int(match.group(2) or "1")
                 changed_lines.update(range(start, start + length))
-        if self.job.line not in changed_lines:
+        if job.line not in changed_lines:
             return "finding line is outside the reviewed diff"
         return None
 
@@ -588,7 +597,9 @@ class FixWorkspace:
         )
         self.base_commit = current_target
 
-    def validate_diff(self) -> DiffSummary:
+    def validate_diff(
+        self, required_finding_files: tuple[str, ...] | None = None
+    ) -> DiffSummary:
         untracked = tuple(
             path
             for path in self.runner.run(
@@ -629,8 +640,17 @@ class FixWorkspace:
                 f"fix changed {len(changes)} files; limit is {policy.max_changed_files}"
             )
         files = tuple(file for _, file in changes)
-        if policy.require_finding_file_changed and self.job.file not in files:
-            raise FixAgentError("fix did not change the finding file")
+        required = (
+            (self.job.file,)
+            if required_finding_files is None
+            else required_finding_files
+        )
+        if policy.require_finding_file_changed:
+            missing = sorted(set(required).difference(files))
+            if missing:
+                raise FixAgentError(
+                    "fix did not change the finding file(s): " + ", ".join(missing)
+                )
         for status, file in changes:
             if status not in {"M", "A", "D"}:
                 raise FixAgentError(f"unsupported Git change type {status}: {file}")
@@ -670,6 +690,169 @@ class FixWorkspace:
         )
         return DiffSummary(files, added, deleted)
 
+    def commit_finding_groups(
+        self,
+        groups: tuple[tuple[tuple[str, ...], tuple[str, ...], str, Job], ...],
+    ) -> tuple[FindingCommit, ...]:
+        changed = set(self.validate_diff(tuple()).files)
+        grouped = {file for _, files, _, _ in groups for file in files}
+        if changed != grouped:
+            missing = sorted(changed.difference(grouped))
+            extra = sorted(grouped.difference(changed))
+            raise FixAgentError(
+                "batch change groups do not match the working diff: "
+                f"missing={missing}, extra={extra}"
+            )
+        self.runner.run(
+            ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
+        )
+        validated_tree = self.runner.run(
+            ["git", "write-tree"], cwd=self.path, environment=self.safe_environment
+        ).stdout.strip()
+        self.runner.run(
+            ["git", "reset", "--mixed", "HEAD"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        commits: list[FindingCommit] = []
+        for fingerprints, files, title, job in groups:
+            self.runner.run(
+                ["git", "add", "--all", "--", *files],
+                cwd=self.path,
+                environment=self.safe_environment,
+            )
+            staged = {
+                value
+                for value in self.runner.run(
+                    ["git", "diff", "--cached", "--name-only", "-z"],
+                    cwd=self.path,
+                    environment=self.safe_environment,
+                ).stdout.split("\0")
+                if value
+            }
+            if staged != set(files):
+                raise FixAgentError(
+                    "finding commit staged unexpected files: "
+                    f"expected={sorted(files)}, actual={sorted(staged)}"
+                )
+            message = self._commit_message(job, title)
+            self.runner.run(
+                [
+                    "git",
+                    "-c",
+                    f"user.name={self.repository.git_author_name}",
+                    "-c",
+                    f"user.email={self.repository.git_author_email}",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+                cwd=self.path,
+                environment=self.safe_environment,
+                timeout_seconds=self.repository.command_timeout_seconds,
+            )
+            commits.append(
+                FindingCommit(
+                    fingerprints,
+                    files,
+                    title,
+                    self.head_commit(),
+                )
+            )
+        final_tree = self.runner.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.strip()
+        if final_tree != validated_tree:
+            raise FixAgentError("finding commit chain differs from the validated tree")
+        return tuple(commits)
+
+    def discard_group_changes(self, files: tuple[str, ...]) -> None:
+        if not files:
+            return
+        self.runner.run(
+            ["git", "reset", "--mixed", "HEAD", "--", *files],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        tracked: list[str] = []
+        for file in files:
+            exists = self.runner.run(
+                ["git", "cat-file", "-e", f"{self._base_commit()}:{file}"],
+                cwd=self.path,
+                environment=self.safe_environment,
+                check=False,
+            )
+            if exists.returncode == 0:
+                tracked.append(file)
+        if tracked:
+            self.runner.run(
+                [
+                    "git",
+                    "restore",
+                    "--source",
+                    self._base_commit(),
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    *tracked,
+                ],
+                cwd=self.path,
+                environment=self.safe_environment,
+            )
+        untracked = sorted(set(files).difference(tracked))
+        if untracked:
+            self.runner.run(
+                ["git", "clean", "-fd", "--", *untracked],
+                cwd=self.path,
+                environment=self.safe_environment,
+            )
+
+    def flatten_batch_to_target(self, target_commit: str) -> None:
+        final_tree = self.runner.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.strip()
+        self.runner.run(
+            ["git", "reset", "--mixed", target_commit],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        self.runner.run(
+            ["git", "add", "--all"], cwd=self.path, environment=self.safe_environment
+        )
+        working_tree = self.runner.run(
+            ["git", "write-tree"], cwd=self.path, environment=self.safe_environment
+        ).stdout.strip()
+        self.runner.run(
+            ["git", "reset", "--mixed", "HEAD"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        )
+        if working_tree != final_tree:
+            raise FixAgentError("target integration changed the validated batch tree")
+        self.base_commit = target_commit
+
+    def commit_parent(self, commit: str) -> str:
+        return self.runner.run(
+            ["git", "rev-parse", f"{commit}^"],
+            cwd=self.path,
+            environment=self.safe_environment,
+        ).stdout.strip().lower()
+
+    def is_ancestor(self, commit: str, descendant: str) -> bool:
+        result = self.runner.run(
+            ["git", "merge-base", "--is-ancestor", commit, descendant],
+            cwd=self.path,
+            environment=self.safe_environment,
+            check=False,
+        )
+        return result.returncode == 0
+
     def commit(self, title: str) -> tuple[str, str]:
         digest = self.job.fingerprint.removeprefix("sha256:")
         if self.repository.publish_mode == "pull_request":
@@ -681,14 +864,7 @@ class FixWorkspace:
             cwd=self.path,
             environment=self.safe_environment,
         )
-        message = self.repository.commit_message_template.format(
-            title=title,
-            fingerprint=self.job.fingerprint,
-            fingerprint_short=digest[:12],
-            file=self.job.file,
-        )
-        _, separator, body = message.partition("\n")
-        message = title + (separator + body if separator else "")
+        message = self._commit_message(self.job, title)
         if self.repository.publish_mode == "pull_request":
             self.runner.run(
                 ["git", "switch", "-c", branch],
@@ -719,6 +895,17 @@ class FixWorkspace:
             ["git", "rev-parse", "HEAD"], cwd=self.path, environment=self.safe_environment
         ).stdout.strip()
         return branch, commit
+
+    def _commit_message(self, job: Job, title: str) -> str:
+        digest = job.fingerprint.removeprefix("sha256:")
+        message = self.repository.commit_message_template.format(
+            title=title,
+            fingerprint=job.fingerprint,
+            fingerprint_short=digest[:12],
+            file=job.file,
+        )
+        _, separator, body = message.partition("\n")
+        return title + (separator + body if separator else "")
 
     def _base_commit(self) -> str:
         if self.base_commit is None:

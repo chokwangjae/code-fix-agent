@@ -17,6 +17,7 @@ _GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SEVERITIES = ("Critical", "Major", "Minor")
 _PUBLISH_MODES = ("pull_request", "direct")
+_PROCESSING_MODES = ("finding", "review_batch")
 _DEFAULT_SETUP_WATCH_PATHS = (
     "package.json",
     "package-lock.json",
@@ -114,6 +115,7 @@ class RepositoryConfig:
     local_path: Path
     remote: str
     publish_mode: str
+    processing_mode: str
     github_token: str | None = field(repr=False)
     github_token_env: str | None
     discord: DiscordConfig
@@ -318,6 +320,16 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         raise FixAgentError(
             f"{context}.publish_mode must be one of: {', '.join(_PUBLISH_MODES)}"
         )
+    processing_mode = raw.get("processing_mode", "finding")
+    if processing_mode not in _PROCESSING_MODES:
+        raise FixAgentError(
+            f"{context}.processing_mode must be one of: "
+            + ", ".join(_PROCESSING_MODES)
+        )
+    if processing_mode == "review_batch" and publish_mode != "direct":
+        raise FixAgentError(
+            f"{context}.processing_mode = review_batch requires publish_mode = direct"
+        )
     execution = raw.get("execution", {})
     if not isinstance(execution, dict):
         raise FixAgentError(f"{context}.execution must be a table")
@@ -339,6 +351,7 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         local_path=_resolve_path(base, _required_string(raw, "local_path", context)),
         remote=remote,
         publish_mode=publish_mode,
+        processing_mode=processing_mode,
         github_token=github_token,
         github_token_env=github_token_env,
         discord=_discord(raw.get("discord"), context),

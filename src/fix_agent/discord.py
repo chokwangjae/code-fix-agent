@@ -14,9 +14,15 @@ WARNING_COLOR = 0xE67E22
 _NOTIFIABLE_EVENTS = {
     "finding_validation_started",
     "finding_validation_completed",
+    "batch_validation_started",
+    "batch_validation_completed",
     "fix_started",
+    "batch_fix_started",
     "fix_applied",
+    "result_validation_started",
+    "result_validation_completed",
     "fix_iteration_failed",
+    "batch_fallback_started",
     "restart_recovery_scheduled",
     "retry_scheduled",
     "target_moved",
@@ -85,12 +91,24 @@ def _presentation(event: JobEvent) -> tuple[str, int]:
         return "🔎 코드 수정 finding 검증 시작", INFO_COLOR
     if event.event_type == "finding_validation_completed":
         return "✅ 코드 수정 finding 검증 완료", PASS_COLOR
+    if event.event_type == "batch_validation_started":
+        return "🔎 코드 수정 배치 finding 검증 시작", INFO_COLOR
+    if event.event_type == "batch_validation_completed":
+        return "✅ 코드 수정 배치 finding 검증 완료", PASS_COLOR
     if event.event_type == "fix_started":
         return "🛠️ 코드 수정 시작", INFO_COLOR
+    if event.event_type == "batch_fix_started":
+        return "🛠️ 코드 수정 배치 시작", INFO_COLOR
     if event.event_type == "fix_applied":
         return "🛠️ 코드 수정안 생성 완료", INFO_COLOR
+    if event.event_type == "result_validation_started":
+        return "🔎 코드 수정 결과 검증 시작", INFO_COLOR
+    if event.event_type == "result_validation_completed":
+        return "✅ 코드 수정 결과 검증 완료", PASS_COLOR
     if event.event_type == "fix_iteration_failed":
         return "🔄 코드 수정 보완 계속", WARNING_COLOR
+    if event.event_type == "batch_fallback_started":
+        return "🔄 문제 finding 개별 처리 전환", WARNING_COLOR
     if event.event_type == "restart_recovery_scheduled":
         return "🔄 코드 수정 재시작 복구", WARNING_COLOR
     if event.event_type == "retry_scheduled":

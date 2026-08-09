@@ -27,6 +27,7 @@ target_branch = "dev"
 local_path = "../Matrix_Mobile_V2"
 remote = "origin"
 publish_mode = "direct"
+processing_mode = "review_batch"
 # github_token = "replace-with-a-repository-scoped-token"
 # github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []

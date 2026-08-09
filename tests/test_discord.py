@@ -62,9 +62,15 @@ class DiscordPayloadTest(unittest.TestCase):
         expected = {
             "finding_validation_started": "🔎 코드 수정 finding 검증 시작",
             "finding_validation_completed": "✅ 코드 수정 finding 검증 완료",
+            "batch_validation_started": "🔎 코드 수정 배치 finding 검증 시작",
+            "batch_validation_completed": "✅ 코드 수정 배치 finding 검증 완료",
             "fix_started": "🛠️ 코드 수정 시작",
+            "batch_fix_started": "🛠️ 코드 수정 배치 시작",
             "fix_applied": "🛠️ 코드 수정안 생성 완료",
+            "result_validation_started": "🔎 코드 수정 결과 검증 시작",
+            "result_validation_completed": "✅ 코드 수정 결과 검증 완료",
             "fix_iteration_failed": "🔄 코드 수정 보완 계속",
+            "batch_fallback_started": "🔄 문제 finding 개별 처리 전환",
             "restart_recovery_scheduled": "🔄 코드 수정 재시작 복구",
             "retry_scheduled": "🔄 코드 수정 재시도 예정",
         }

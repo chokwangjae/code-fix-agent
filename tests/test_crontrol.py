@@ -143,11 +143,40 @@ class CrontrolReporterTest(unittest.TestCase):
             {first.id: "수정 중", second.id: "테스트 중"},
         )
 
+    def test_counts_one_review_batch_as_one_running_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(Path(directory), review_batch=True)
+            value = event()
+            value["findings"].append(
+                {
+                    **value["findings"][0],
+                    "fingerprint": "sha256:" + "d" * 64,
+                }
+            )
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(value))
+                batch = state.claim_next_batch(config.repositories)
+            opener = RecordingOpener()
+            reporter = CrontrolReporter(config, opener=opener)
+            reporter.sync(batch.jobs[0].id, "리뷰 배치 수정 중")
+
+        payload = json.loads(opener.calls[-1][0].data)
+        self.assertEqual(payload["runningJobCount"], 1)
+        self.assertEqual(len(payload["runningJobs"]), 1)
+        self.assertEqual(
+            payload["schedule"], "repo #1 · 리뷰 배치 수정 중 · 대기 0건"
+        )
+
     @staticmethod
-    def _config(root: Path):
+    def _config(root: Path, *, review_batch: bool = False):
         path = root / "fix.toml"
+        processing = (
+            'publish_mode = "direct"\nprocessing_mode = "review_batch"'
+            if review_batch
+            else ""
+        )
         path.write_text(
-            """
+            f"""
 version = 1
 state_dir = ".state"
 [server]
@@ -165,6 +194,7 @@ id = "repo"
 github = "owner/repo"
 branch = "main"
 local_path = "repo"
+{processing}
 test_commands = []
 [repositories.execution]
 max_attempts = 0

@@ -6,15 +6,16 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
-from .codex_agent import CodexAgent, Decision
+from .codex_agent import BatchChangeGroup, BatchFixDecision, CodexAgent, Decision
 from .command import CommandResult, CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .crontrol import CrontrolReporter
 from .credentials import resolve_github_credential
 from .errors import EnvironmentSetupError, FixAgentError
 from .notify import DiscordNotifier
-from .state import Job, StateStore
+from .state import BatchClaim, Job, StateStore
 from .workspace import (
     DiffSummary,
     FixWorkspace,
@@ -25,6 +26,12 @@ from .workspace import (
 
 _CRONTROL_EVENT_STAGES = {
     "processing_started": "작업 준비",
+    "batch_processing_started": "리뷰 배치 준비",
+    "batch_validation_started": "리뷰 배치 검증 중",
+    "batch_validation_completed": "리뷰 배치 검증 완료",
+    "batch_fix_started": "리뷰 배치 수정 중",
+    "batch_fallback_started": "문제 finding 분리 중",
+    "batch_metrics_recorded": "리뷰 배치 사용량 기록",
     "finding_git_validated": "Git 검증 완료",
     "environment_setup_started": "환경 준비 중",
     "environment_setup_failed": "환경 준비 재시도 중",
@@ -56,6 +63,12 @@ class _SetupState:
     signature: str | None = None
 
 
+class _BatchCorrectionRequired(FixAgentError):
+    def __init__(self, message: str, groups: tuple[BatchChangeGroup, ...]) -> None:
+        super().__init__(message)
+        self.groups = groups
+
+
 class FixWorker:
     def __init__(
         self,
@@ -76,7 +89,12 @@ class FixWorker:
 
     def run_once(self) -> bool:
         with StateStore(self.config.state_dir) as state:
-            job = state.claim_next(self.config.repositories)
+            batch = state.claim_next_batch(self.config.repositories)
+            job = None if batch is not None else state.claim_next(
+                self.config.repositories
+            )
+        if batch is not None:
+            return self._run_batch(batch)
         if job is None:
             self.crontrol.sync(None)
             self._dispatch_notifications()
@@ -119,6 +137,46 @@ class FixWorker:
             self.crontrol.sync(None)
         return True
 
+    def _run_batch(self, batch: BatchClaim) -> bool:
+        primary = batch.jobs[0]
+        repository = self.config.repository_by_id(primary.repository_id)
+        self._current_job_id = primary.id
+        self.crontrol.sync(primary.id, "리뷰 배치 준비")
+        try:
+            self._process_batch(batch, repository)
+        except Exception as exc:
+            retryable = (
+                repository.max_attempts == 0
+                or batch.attempt < repository.max_attempts
+            )
+            next_attempt_at: str | None = None
+            with StateStore(self.config.state_dir) as state:
+                for claimed in batch.jobs:
+                    current = state.job(claimed.id)
+                    if current is None or current.status in {
+                        "completed",
+                        "rejected",
+                        "skipped",
+                        "queued",
+                    }:
+                        continue
+                    scheduled = state.mark_failed(
+                        current.id,
+                        str(exc),
+                        repository.retry_delay_seconds if retryable else None,
+                    )
+                    next_attempt_at = next_attempt_at or scheduled
+                state.mark_batch_failed(batch.id, str(exc))
+            if next_attempt_at is not None:
+                self.crontrol.sync(primary.id, "재시도 대기")
+            print(f"batch {batch.id} failed: {exc}")
+        finally:
+            self.crontrol.sync(primary.id)
+            self._dispatch_notifications()
+            self._current_job_id = None
+            self.crontrol.sync(None)
+        return True
+
     def run_forever(self, poll_seconds: float = 2.0) -> None:
         while not self._stop.is_set():
             if not self.run_once():
@@ -135,6 +193,709 @@ class FixWorker:
             return
         if result.failed:
             print("Discord notification delivery failed; retry is scheduled")
+
+    def _process_batch(
+        self, batch: BatchClaim, repository: RepositoryConfig
+    ) -> None:
+        batch_started = time.monotonic()
+        if repository.publish_mode != "direct":
+            raise FixAgentError("review_batch processing requires publish_mode = direct")
+        primary = batch.jobs[0]
+        self._batch_event(
+            batch.jobs,
+            "batch_processing_started",
+            "worker started processing the review batch",
+            {
+                "batch_id": batch.id,
+                "batch_size": len(batch.jobs),
+                "attempt": batch.attempt,
+                "remote": repository.remote,
+                "target_branch": repository.target_branch,
+            },
+        )
+        with StateStore(self.config.state_dir) as state:
+            resumable_worktree = state.resumable_batch_worktree(batch.id)
+        try:
+            with FixWorkspace(
+                self.runner,
+                repository,
+                primary,
+                self.config.state_dir,
+                resumable_worktree=resumable_worktree,
+            ) as workspace:
+                environment = workspace.safe_environment
+                setup_state = _SetupState()
+                current_target = workspace.fetch_target_head()
+                already_published = tuple(
+                    job
+                    for job in batch.jobs
+                    if job.result_commit
+                    and workspace.is_ancestor(job.result_commit, current_target)
+                )
+                if already_published:
+                    with StateStore(self.config.state_dir) as state:
+                        for job in already_published:
+                            state.mark_pushed(
+                                job.id,
+                                repository.target_branch,
+                                job.result_commit or current_target,
+                            )
+                    published_ids = {job.id for job in already_published}
+                    pending = tuple(
+                        job for job in batch.jobs if job.id not in published_ids
+                    )
+                    if pending and workspace.head_commit() != current_target:
+                        workspace.flatten_batch_to_target(current_target)
+                else:
+                    pending = batch.jobs
+
+                valid_jobs = self._validate_batch_findings(
+                    batch,
+                    repository,
+                    pending,
+                    workspace,
+                    environment,
+                    setup_state,
+                )
+                if valid_jobs:
+                    groups, tests, postcheck = self._fix_batch_until_valid(
+                        batch,
+                        repository,
+                        valid_jobs,
+                        workspace,
+                        environment,
+                        setup_state,
+                    )
+                    if groups:
+                        grouped_fingerprints = {
+                            fingerprint
+                            for group in groups
+                            for fingerprint in group.fingerprints
+                        }
+                        publish_jobs = tuple(
+                            job
+                            for job in valid_jobs
+                            if job.fingerprint in grouped_fingerprints
+                        )
+                        while groups:
+                            try:
+                                self._publish_batch_groups(
+                                    batch,
+                                    repository,
+                                    publish_jobs,
+                                    groups,
+                                    workspace,
+                                    environment,
+                                    setup_state,
+                                )
+                                break
+                            except _BatchCorrectionRequired as exc:
+                                current_target = workspace.fetch_target_head()
+                                workspace.flatten_batch_to_target(current_target)
+                                correction_fingerprints = {
+                                    fingerprint
+                                    for group in exc.groups
+                                    for fingerprint in group.fingerprints
+                                }
+                                publish_jobs = tuple(
+                                    job
+                                    for job in publish_jobs
+                                    if job.fingerprint in correction_fingerprints
+                                )
+                                groups, tests, postcheck = self._fix_batch_until_valid(
+                                    batch,
+                                    repository,
+                                    publish_jobs,
+                                    workspace,
+                                    environment,
+                                    setup_state,
+                                    initial_error=str(exc),
+                                )
+                                grouped_fingerprints = {
+                                    fingerprint
+                                    for group in groups
+                                    for fingerprint in group.fingerprints
+                                }
+                                publish_jobs = tuple(
+                                    job
+                                    for job in publish_jobs
+                                    if job.fingerprint in grouped_fingerprints
+                                )
+            if not workspace.cleanup_complete:
+                raise FixAgentError("batch worktree cleanup did not complete after push")
+            with StateStore(self.config.state_dir) as state:
+                for job in (*already_published, *valid_jobs):
+                    current = state.job(job.id)
+                    if current is not None and current.status == "pushed":
+                        state.mark_completed(job.id, None)
+                state.mark_batch_completed(batch.id)
+        finally:
+            metrics = self.agent.take_batch_metrics()
+            duration_ms = round((time.monotonic() - batch_started) * 1000)
+            with StateStore(self.config.state_dir) as state:
+                state.record_batch_metrics(
+                    batch.id,
+                    codex_calls=metrics.calls,
+                    input_tokens=metrics.input_tokens,
+                    cached_input_tokens=metrics.cached_input_tokens,
+                    cache_write_input_tokens=metrics.cache_write_input_tokens,
+                    output_tokens=metrics.output_tokens,
+                    reasoning_output_tokens=metrics.reasoning_output_tokens,
+                    total_tokens=metrics.total_tokens,
+                    duration_ms=duration_ms,
+                )
+            self._event(
+                primary.id,
+                "batch_metrics_recorded",
+                "review batch Codex usage and execution time were recorded",
+                {
+                    "batch_id": batch.id,
+                    "codex_calls": metrics.calls,
+                    "total_tokens": metrics.total_tokens,
+                    "duration_ms": duration_ms,
+                },
+            )
+
+    def _validate_batch_findings(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+    ) -> tuple[Job, ...]:
+        candidates: list[Job] = []
+        for job in jobs:
+            mismatch = workspace.finding_mismatch_reason(job)
+            if mismatch:
+                with StateStore(self.config.state_dir) as state:
+                    state.record_precheck(job.id, False, mismatch)
+                continue
+            self._event(
+                job.id,
+                "finding_git_validated",
+                "finding commit, file, and reviewed line matched the review diff",
+                {"batch_id": batch.id, "reviewed_target": job.target_commit},
+            )
+            candidates.append(job)
+        if not candidates:
+            return ()
+        self._prepare_environment(
+            repository, candidates[0], workspace, environment, setup_state
+        )
+        reused = {
+            job.fingerprint: job.precheck_reason
+            for job in candidates
+            if job.precheck_status == "valid" and job.precheck_reason
+        }
+        undecided = tuple(job for job in candidates if job.fingerprint not in reused)
+        decisions = ()
+        if undecided:
+            self._batch_event(
+                undecided,
+                "batch_validation_started",
+                "Codex started independent review batch validation",
+                {"batch_id": batch.id, "workspace_base": workspace.base_commit},
+                notify=True,
+            )
+            decisions = self.agent.validate_findings(
+                repository,
+                undecided,
+                workspace.path,
+                environment,
+                workspace.base_commit or undecided[0].target_commit,
+            )
+        by_fingerprint = {decision.fingerprint: decision for decision in decisions}
+        valid: list[Job] = []
+        for job in candidates:
+            if job.fingerprint in reused:
+                reason = reused[job.fingerprint]
+                accepted = True
+            else:
+                decision = by_fingerprint[job.fingerprint]
+                reason = decision.reason
+                accepted = decision.valid
+            with StateStore(self.config.state_dir) as state:
+                state.record_precheck(job.id, accepted, reason or "")
+            self._event(
+                job.id,
+                "batch_validation_completed",
+                "Codex completed independent finding validation in the review batch",
+                {
+                    "batch_id": batch.id,
+                    "valid": accepted,
+                    "reason": reason,
+                    "reused": job.fingerprint in reused,
+                },
+                notify=True,
+            )
+            if accepted:
+                valid.append(job)
+        return tuple(valid)
+
+    def _fix_batch_until_valid(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+        initial_error: str | None = None,
+    ) -> tuple[
+        tuple[BatchChangeGroup, ...],
+        list[dict[str, object]],
+        BatchFixDecision | None,
+    ]:
+        active = jobs
+        iteration = 1
+        previous_error = initial_error or next(
+            (job.last_error for job in jobs if job.last_error), None
+        )
+        while active:
+            self._batch_event(
+                active,
+                "batch_fix_started",
+                "Codex started the review batch edit",
+                {
+                    "batch_id": batch.id,
+                    "iteration": iteration,
+                    "same_worktree": iteration > 1 or batch.attempt > 1,
+                    "previous_error": previous_error[:4_000] if previous_error else None,
+                },
+                notify=True,
+            )
+            groups: tuple[BatchChangeGroup, ...] = ()
+            tests: list[dict[str, object]] = []
+            try:
+                self._ensure_workspace_permissions(
+                    active[0], workspace, f"batch_fix_{iteration}_before_edit"
+                )
+                groups = self.agent.apply_batch_fixes(
+                    repository,
+                    active,
+                    workspace.path,
+                    environment,
+                    workspace.base_commit or active[0].target_commit,
+                    previous_error,
+                )
+                self._prepare_environment(
+                    repository, active[0], workspace, environment, setup_state
+                )
+                self._ensure_workspace_permissions(
+                    active[0], workspace, f"batch_fix_{iteration}_before_harness"
+                )
+                summary = workspace.validate_diff(tuple(job.file for job in active))
+                grouped_files = {file for group in groups for file in group.files}
+                if set(summary.files) != grouped_files:
+                    raise FixAgentError(
+                        "batch change groups do not match the working diff"
+                    )
+                workspace.stage_for_harness()
+                for job in active:
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_testing(job.id)
+                self._event(
+                    active[0].id,
+                    "tests_started",
+                    "configured repository harness started for the review batch",
+                    {
+                        "batch_id": batch.id,
+                        "commands": len(repository.test_commands),
+                        "iteration": iteration,
+                    },
+                )
+                tests = self._run_tests(repository, workspace.path, environment)
+                failed = [test for test in tests if test["returncode"] != 0]
+                for job in active:
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_tests(job.id, tests)
+                if failed:
+                    raise FixAgentError(_test_failure_error(failed))
+                self._batch_event(
+                    active,
+                    "result_validation_started",
+                    "Codex started independent review batch result validation",
+                    {
+                        "batch_id": batch.id,
+                        "iteration": iteration,
+                        "workspace_base": workspace.base_commit,
+                    },
+                    notify=True,
+                )
+                postcheck = self.agent.validate_batch_fix(
+                    repository,
+                    active,
+                    groups,
+                    workspace.path,
+                    environment,
+                    workspace.base_commit or active[0].target_commit,
+                )
+                decisions = {
+                    decision.fingerprint: decision for decision in postcheck.findings
+                }
+                for job in active:
+                    decision = decisions[job.fingerprint]
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_postcheck(
+                            job.id,
+                            decision.valid,
+                            decision.reason,
+                            retry_on_failure=True,
+                        )
+                self._batch_event(
+                    active,
+                    "result_validation_completed",
+                    "Codex completed independent review batch result validation",
+                    {
+                        "batch_id": batch.id,
+                        "iteration": iteration,
+                        "resolved": postcheck.resolved,
+                        "reason": postcheck.reason,
+                    },
+                    notify=True,
+                )
+                if not postcheck.resolved or not all(
+                    decision.valid for decision in postcheck.findings
+                ):
+                    raise FixAgentError(
+                        "batch fix did not pass independent validation: "
+                        + postcheck.reason
+                    )
+                workspace.validate_diff(tuple(job.file for job in active))
+                return postcheck.groups, tests, postcheck
+            except EnvironmentSetupError:
+                raise
+            except FixAgentError as exc:
+                previous_error = str(exc)
+                for job in active:
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_fix_iteration_failure(job.id, previous_error, tests)
+                self._batch_event(
+                    active,
+                    "fix_iteration_failed",
+                    "review batch validation failed; editing continues in the same worktree",
+                    {
+                        "batch_id": batch.id,
+                        "iteration": iteration,
+                        "next_iteration": iteration + 1,
+                        "error": previous_error[:4_000],
+                        "same_worktree": True,
+                    },
+                    notify=True,
+                )
+                if iteration >= 2 and groups:
+                    problem = self.agent.diagnose_batch_failure(
+                        repository,
+                        active,
+                        groups,
+                        workspace.path,
+                        environment,
+                        previous_error,
+                    )
+                    problem_set = set(problem)
+                    problem_group = next(
+                        group
+                        for group in groups
+                        if problem_set.intersection(group.fingerprints)
+                    )
+                    isolated = tuple(
+                        job for job in active if job.fingerprint in problem_set
+                    )
+                    workspace.discard_group_changes(problem_group.files)
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_finding_fallback(
+                            tuple(job.id for job in isolated), previous_error
+                        )
+                    self._batch_event(
+                        isolated,
+                        "batch_fallback_started",
+                        "repeated failure isolated the finding group for finding mode",
+                        {
+                            "batch_id": batch.id,
+                            "fingerprints": list(problem),
+                            "files": list(problem_group.files),
+                            "reason": previous_error[:4_000],
+                        },
+                    )
+                    active = tuple(
+                        job for job in active if job.fingerprint not in problem_set
+                    )
+                    iteration = 1
+                    continue
+                iteration += 1
+        return (), [], None
+
+    def _publish_batch_groups(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        groups: tuple[BatchChangeGroup, ...],
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+    ) -> None:
+        jobs_by_fingerprint = {job.fingerprint: job for job in jobs}
+        remaining = groups
+        remote_merges = 0
+        while remaining:
+            current_round = remaining
+            commit_inputs = tuple(
+                (
+                    group.fingerprints,
+                    group.files,
+                    group.commit_title or "fix: 리뷰 finding 수정",
+                    jobs_by_fingerprint[group.fingerprints[0]],
+                )
+                for group in current_round
+            )
+            commits = workspace.commit_finding_groups(commit_inputs)
+            restart = False
+            for index, finding_commit in enumerate(commits):
+                expected_parent = workspace.commit_parent(finding_commit.commit)
+                current = workspace.fetch_target_head()
+                if current != expected_parent:
+                    remaining = current_round[index:]
+                    remote_merges = self._reconcile_batch_target(
+                        batch,
+                        repository,
+                        jobs,
+                        groups,
+                        remaining,
+                        workspace,
+                        environment,
+                        setup_state,
+                        remote_merges,
+                    )
+                    restart = True
+                    break
+                self._batch_event(
+                    tuple(
+                        jobs_by_fingerprint[value]
+                        for value in finding_commit.fingerprints
+                    ),
+                    "push_started",
+                    "pushing one finding change group to the configured target",
+                    {
+                        "batch_id": batch.id,
+                        "remote": repository.remote,
+                        "branch": repository.target_branch,
+                        "commit": finding_commit.commit,
+                    },
+                )
+                try:
+                    self._push_commit(
+                        repository,
+                        workspace.path,
+                        environment,
+                        repository.target_branch,
+                        finding_commit.commit,
+                    )
+                except FixAgentError as push_error:
+                    current = workspace.fetch_target_head()
+                    if current != finding_commit.commit:
+                        if current == expected_parent:
+                            raise push_error
+                        remaining = current_round[index:]
+                        remote_merges = self._reconcile_batch_target(
+                            batch,
+                            repository,
+                            jobs,
+                            groups,
+                            remaining,
+                            workspace,
+                            environment,
+                            setup_state,
+                            remote_merges,
+                        )
+                        restart = True
+                        break
+                for fingerprint in finding_commit.fingerprints:
+                    job = jobs_by_fingerprint[fingerprint]
+                    self._event(
+                        job.id,
+                        "push_completed",
+                        "finding change group was pushed to the configured target",
+                        {
+                            "batch_id": batch.id,
+                            "remote": repository.remote,
+                            "branch": repository.target_branch,
+                            "commit": finding_commit.commit,
+                            "fingerprints": list(finding_commit.fingerprints),
+                        },
+                    )
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_pushed(
+                            job.id, repository.target_branch, finding_commit.commit
+                        )
+            if not restart:
+                remaining = ()
+                break
+
+    def _reconcile_batch_target(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        all_groups: tuple[BatchChangeGroup, ...],
+        remaining: tuple[BatchChangeGroup, ...],
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+        remote_merges: int,
+    ) -> int:
+        if remote_merges >= repository.max_remote_merge_attempts:
+            raise FixAgentError("target branch kept moving during batch push")
+        current = workspace.fetch_target_head()
+        self._batch_event(
+            jobs,
+            "target_moved",
+            "target moved; the whole review batch will be revalidated",
+            {
+                "batch_id": batch.id,
+                "previous_base": workspace.base_commit,
+                "current_target": current,
+                "merge_attempt": remote_merges + 1,
+            },
+        )
+        merge = workspace.merge_latest_target(current)
+        if merge.conflict_files:
+            self._batch_event(
+                jobs,
+                "merge_conflict_detected",
+                "target merge produced review batch conflicts",
+                {"batch_id": batch.id, "files": list(merge.conflict_files)},
+            )
+            resolution = self.agent.resolve_batch_merge_conflicts(
+                repository,
+                jobs,
+                workspace.path,
+                environment,
+                merge.previous_base,
+                merge.current_target,
+                merge.conflict_files,
+            )
+            if not resolution.valid:
+                raise FixAgentError(
+                    "Codex could not safely resolve batch merge conflicts: "
+                    + resolution.reason
+                )
+            workspace.complete_conflicted_merge(merge.current_target)
+            self._batch_event(
+                jobs,
+                "merge_conflict_resolved",
+                "review batch merge conflicts were resolved and recorded",
+                {"batch_id": batch.id, "reason": resolution.reason},
+            )
+        else:
+            self._batch_event(
+                jobs,
+                "target_merged",
+                "latest target was merged into the review batch",
+                {
+                    "batch_id": batch.id,
+                    "previous_base": merge.previous_base,
+                    "current_target": merge.current_target,
+                    "commit": workspace.head_commit(),
+                },
+            )
+        required_files = tuple(
+            jobs_by_file.file
+            for group in remaining
+            for jobs_by_file in jobs
+            if jobs_by_file.fingerprint in group.fingerprints
+        )
+        correction_groups = remaining
+        try:
+            workspace.validate_diff(required_files)
+            self._prepare_environment(
+                repository, jobs[0], workspace, environment, setup_state
+            )
+            tests = self._run_tests(repository, workspace.path, environment)
+            failed = [test for test in tests if test["returncode"] != 0]
+            for job in jobs:
+                with StateStore(self.config.state_dir) as state:
+                    current_job = state.job(job.id)
+                    if current_job is not None and current_job.status == "pushed":
+                        state.record_event(
+                            job.id,
+                            "batch_target_tests_recorded",
+                            "target-move harness result retained for a pushed finding",
+                            {"batch_id": batch.id, "tests": len(tests)},
+                        )
+                    else:
+                        state.record_tests(job.id, tests)
+            if failed:
+                raise FixAgentError(
+                    _test_failure_error(failed, after_target_merge=True)
+                )
+            validation = self.agent.validate_batch_fix(
+                repository,
+                jobs,
+                all_groups,
+                workspace.path,
+                environment,
+                workspace.base_commit or current,
+            )
+            if not validation.resolved or not all(
+                decision.valid for decision in validation.findings
+            ):
+                invalid_fingerprints = {
+                    decision.fingerprint
+                    for decision in validation.findings
+                    if not decision.valid
+                }
+                if invalid_fingerprints:
+                    correction_fingerprints = invalid_fingerprints.union(
+                        fingerprint
+                        for group in remaining
+                        for fingerprint in group.fingerprints
+                    )
+                    correction_groups = tuple(
+                        group
+                        for group in all_groups
+                        if correction_fingerprints.intersection(group.fingerprints)
+                    )
+                raise FixAgentError(
+                    "target-integrated batch did not pass validation: "
+                    + validation.reason
+                )
+        except EnvironmentSetupError:
+            raise
+        except FixAgentError as exc:
+            raise _BatchCorrectionRequired(str(exc), correction_groups) from exc
+        workspace.flatten_batch_to_target(current)
+        self._batch_event(
+            jobs,
+            "merged_fix_revalidated",
+            "target-integrated review batch passed the full harness and result validation",
+            {
+                "batch_id": batch.id,
+                "target_commit": current,
+                "merge_attempt": remote_merges + 1,
+            },
+        )
+        return remote_merges + 1
+
+    def _batch_event(
+        self,
+        jobs: tuple[Job, ...],
+        event_type: str,
+        message: str,
+        details: dict[str, object],
+        *,
+        notify: bool = False,
+    ) -> None:
+        if not jobs:
+            return
+        self._event(jobs[0].id, event_type, message, details)
+        with StateStore(self.config.state_dir) as state:
+            for job in jobs[1:]:
+                state.record_event(job.id, event_type, message, details)
+        if notify:
+            self._dispatch_notifications()
 
     def _process(self, job: Job) -> None:
         repository = self.config.repository_by_id(job.repository_id)
@@ -798,6 +1559,16 @@ class FixWorker:
         environment: dict[str, str],
         branch: str,
     ) -> None:
+        self._push_commit(repository, workspace, environment, branch, "HEAD")
+
+    def _push_commit(
+        self,
+        repository: RepositoryConfig,
+        workspace: Path,
+        environment: dict[str, str],
+        branch: str,
+        commit: str,
+    ) -> None:
         token = self._github_token(repository)
         push_environment = dict(environment)
         expected_urls = {
@@ -824,9 +1595,7 @@ class FixWorker:
         command = ["git", "push"]
         if repository.publish_mode == "pull_request":
             command.append("--set-upstream")
-        command.extend(
-            [repository.remote, f"HEAD:refs/heads/{branch}"]
-        )
+        command.extend([repository.remote, f"{commit}:refs/heads/{branch}"])
         self.runner.run(
             command,
             cwd=workspace,

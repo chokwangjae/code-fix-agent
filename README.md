@@ -1,6 +1,6 @@
 # 코드 수정 에이전트
 
-검증된 코드 리뷰 이슈를 다시 확인한 뒤 대상 프로젝트 규칙에 맞춰 수정하고 설정된 remote와 target branch에 반영한다. finding 사실 여부, 원격 merge와 수정 결과의 판단 사유를 SQLite에 남기며 정책과 테스트를 통과하지 못한 작업은 push하지 않는다.
+검증된 코드 리뷰 이슈를 다시 확인한 뒤 대상 프로젝트 규칙에 맞춰 수정하고 설정된 remote와 target branch에 반영한다. 기본 `review_batch` 모드는 한 리뷰의 finding을 저장소별로 함께 검증·수정하고 commit과 push는 finding 변경 그룹별로 나눈다. finding 사실 여부, 원격 merge와 수정 결과의 판단 사유를 SQLite에 남기며 정책과 테스트를 통과하지 못한 작업은 push하지 않는다.
 
 ## 빠른 시작
 
@@ -31,6 +31,8 @@ max_concurrent_jobs = 3
 
 [[repositories]]
 # 다른 저장소 설정 생략
+publish_mode = "direct"
+processing_mode = "review_batch"
 github_token = "저장소 쓰기 권한 GitHub token"
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
@@ -56,7 +58,10 @@ curl http://127.0.0.1:7081/health
 - fingerprint 중복 방지, 독립 사실 검증과 사유 기록
 - 검증된 diff와 대상 저장소 규칙에 맞는 commit type·scope·제목 생성
 - 저장소별 `remote`, `target_branch`, direct push 또는 PR 방식 선택
-- finding별 최신 target 기반 독립 detached worktree, 원격 이동 시 merge·재검증
+- 리뷰 배치별 최신 target 기반 detached worktree, 원격 이동 시 배치 전체 merge·재검증
+- fingerprint별 판정 근거와 결과 유지, 같은 파일 finding의 변경 그룹 병합
+- finding 변경 그룹별 commit·순차 push, 반복 실패 그룹의 finding 모드 전환
+- 배치별 Codex 호출 수·token·실행 시간 기록
 - 관리 worktree의 소유자 쓰기 권한 자동 보정과 단계별 재확인
 - npm·Gradle·Pub·Playwright·CocoaPods·임시 파일용 전용 runtime cache
 - 새 worktree의 저장소별 의존성·브라우저·컨테이너 사전 준비와 실패 재시도
@@ -106,9 +111,9 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 자동 트리거는 인증된 `POST /reviews` 요청으로 연결한다. 같은 장비에서 수동으로 전달할 때는 `fix-agent submit`을 사용할 수 있다.
 
-`serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 job, branch와 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
+`serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 리뷰 배치 또는 finding 작업과 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
-severity·경로·fingerprint 예외와 독립 사실 검증에서 오탐으로 판정한 항목은 수정하지 않는다. 사실 검증을 통과해 수정 대상으로 확정된 job은 `max_attempts = 0`일 때 완료될 때까지 처리한다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 기존 diff와 실패 출력을 Codex에 전달해 보완한다. 모든 검증을 통과한 뒤 commit과 push를 실행하고 worktree를 제거한다.
+`processing_mode = "review_batch"`는 이벤트의 finding을 한 worktree에서 함께 사실 검증하고 수정한다. 같은 파일을 지목한 finding은 한 변경 그룹으로 합치며, 다른 그룹은 각각 commit한 뒤 target branch에 순서대로 push한다. 오탐만 fingerprint별 `rejected`로 끝낸다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 배치 전체를 보완하고, 반복 실패 원인이 특정 그룹으로 좁혀지면 그 그룹만 기존 finding 처리 방식으로 돌린다. 이전 방식이 필요하면 저장소별 `processing_mode = "finding"`으로 되돌린다. 배치 모드는 finding별 순차 push가 필요한 `publish_mode = "direct"`에서만 사용할 수 있다.
 
 프로세스를 재시작하면 `validating`, `fixing`, `testing`, `ready`, `pushed` 상태였던 job을 자동 복구한다. 재시작은 시도 횟수를 늘리지 않는다. 기록된 worktree가 남아 있으면 미커밋 diff와 생성된 commit을 포함한 현재 상태에서 수정을 이어가고, worktree가 없으면 최신 target에서 다시 시작한다. 복구 과정은 `restart_recovery_scheduled`, `worktree_resumed` event로 남는다.
 

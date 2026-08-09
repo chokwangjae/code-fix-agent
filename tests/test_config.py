@@ -17,6 +17,7 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.crontrol.enabled)
         self.assertEqual(repository.target_branch, "main")
         self.assertEqual(repository.publish_mode, "direct")
+        self.assertEqual(repository.processing_mode, "finding")
         self.assertEqual(repository.max_attempts, 0)
         self.assertEqual(repository.setup_max_attempts, 2)
         self.assertEqual(repository.setup_retry_delay_seconds, 3)
@@ -68,6 +69,34 @@ class ConfigTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(FixAgentError, "publish_mode"):
+                load_config(path)
+
+    def test_loads_review_batch_mode_for_direct_publish(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            path.write_text(
+                self._config().replace(
+                    'publish_mode = "direct"',
+                    'publish_mode = "direct"\nprocessing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(path)
+
+        self.assertEqual(config.repositories[0].processing_mode, "review_batch")
+
+    def test_rejects_review_batch_with_pull_request_publish(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            path.write_text(
+                self._config().replace(
+                    'publish_mode = "direct"',
+                    'publish_mode = "pull_request"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(FixAgentError, "requires publish_mode"):
                 load_config(path)
 
     def test_rejects_negative_retry_settings(self) -> None:

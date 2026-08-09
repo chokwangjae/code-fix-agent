@@ -1,6 +1,6 @@
 # 수정 작업과 worktree 생명주기
 
-이 문서는 리뷰 finding 한 건이 최신 원격 target에서 수정되고 push된 뒤 worktree가 제거될 때까지의 실행 계약을 설명한다. 외부 송신 형식은 [리뷰 이벤트 v1 계약](02-리뷰-이벤트-v1-계약.md)을 따른다.
+이 문서는 리뷰 배치가 최신 원격 target에서 수정되고 finding 변경 그룹별로 push된 뒤 worktree가 제거될 때까지의 실행 계약을 설명한다. 외부 송신 형식은 [리뷰 이벤트 v1 계약](02-리뷰-이벤트-v1-계약.md)을 따른다.
 
 리뷰 수신부터 Crontrol 표시와 최종 통지까지의 전체 순서는 [Crontrol 등록과 실제 수정 흐름](04-Crontrol-등록과-실제-수정-흐름.md)에 정리했다.
 
@@ -14,6 +14,7 @@ target_branch = "dev"
 local_path = "../Matrix_Mobile_V2"
 remote = "origin"
 publish_mode = "direct"
+processing_mode = "review_batch"
 github_token_env = "MATRIX_MOBILE_FIX_GITHUB_TOKEN"
 git_author_name = "broken-agent"
 git_author_email = "g_uapm@inswave.com"
@@ -56,10 +57,11 @@ allow_deletions = true
 
 ```text
 origin/dev 최신 commit
-  → finding 전용 detached worktree
-  → 수정·검증·commit
-  → 필요하면 최신 origin/dev merge
-  → origin/dev push
+  → 리뷰 배치 전용 detached worktree
+  → 배치 수정·하네스·결과 검증
+  → finding 변경 그룹별 commit
+  → 필요하면 최신 origin/dev merge와 배치 전체 재검증
+  → commit별 origin/dev 순차 push
   → worktree 제거
 ```
 
@@ -72,17 +74,17 @@ origin/dev 최신 commit
 
 현재 저장소의 대상 설정은 `direct`다. branch protection이 직접 push를 금지하면 작업은 `failed`가 된다. 설정을 우회하거나 force push하지 않는다.
 
+`processing_mode = "review_batch"`는 `publish_mode = "direct"`에서만 쓸 수 있다. 기존 finding별 worktree가 필요한 저장소는 `processing_mode = "finding"`으로 설정한다.
+
 ## 작업 분리 단위
 
-리뷰 이벤트에 finding이 여러 개 있어도 SQLite 작업은 finding마다 하나씩 만든다. worker는 작업 하나마다 다음 자원을 새로 만든다.
+finding별 SQLite job과 fingerprint 판단 기록은 유지한다. `review_batch` worker는 한 리뷰 요청에서 새로 만든 job을 `batch_id`로 묶고 worktree, 환경 준비, Codex 배치 호출, 저장소 하네스와 target 이동 재검증을 공유한다. 이슈 10개를 한 이벤트의 `findings[]`로 보내면 worktree는 하나다. 같은 이슈를 요청 10건으로 나눠 보내면 배치도 10개가 되므로 송신기는 같은 repository·branch·review target의 finding을 한 요청에 모아야 한다.
 
-- SQLite job ID
-- `fix-<random>` 임시 디렉터리
-- detached worktree
-- fix commit
-- push 시도와 event log
+commit과 push는 변경 그룹별로 나눈다. 같은 파일을 지목한 finding은 중복 수정과 충돌을 막기 위해 한 그룹으로 합치며 fingerprint별 판정 사유는 각각 남긴다. 서로 다른 파일 그룹은 각각 commit하고 앞 commit의 push가 끝난 뒤 다음 commit을 같은 target branch로 push한다. 지원 파일은 한 그룹에만 배정한다.
 
-한 finding의 파일 변경을 다른 finding worktree와 합치지 않는다. `serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 세 작업은 각자 branch와 worktree를 만들고, 한 작업의 검증 실패는 그 작업 worktree에서만 보완한다. 검증 통과 뒤 commit과 push를 끝낸 작업의 worktree만 제거한다. 프로세스 오류로 worktree를 유지하지 못한 경우에는 최신 target에서 다시 만든다. 다른 작업이 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
+반복 실패 원인이 특정 그룹으로 좁혀지면 해당 그룹의 변경을 worktree에서 되돌리고 그 fingerprint만 기존 finding 처리 대기열로 옮긴다. 나머지 배치는 같은 worktree에서 계속 보완한다. `processing_mode = "finding"`은 기존처럼 finding마다 `fix-<random>` 디렉터리, detached worktree, fix commit과 push 이력을 만든다.
+
+`serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 각 worker는 배치나 finding마다 worktree를 나눈다. 같은 저장소의 다른 worker가 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
 
 ```toml
 [server]
@@ -179,20 +181,23 @@ Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서�
 - `environment_setup_failed`: 실패 명령, 종료 코드, 제한한 stdout·stderr와 다음 재시도 여부
 - `environment_setup_completed`: 성공한 시도, 명령 수, 복원한 Git 경로와 권한 보정 수
 
-## 5. finding 검증과 수정
+## 5. 배치 finding 검증과 수정
 
-worktree 안에서 다음 단계를 실행한다.
+`review_batch` worktree 안에서 다음 단계를 실행한다.
 
 1. finding 도입 commit이 리뷰 target의 조상인지 확인
 2. 도입 commit이 finding 파일을 변경했는지 확인
 3. finding line이 `baseline..target` diff에 속하는지 확인
 4. 저장소 환경 준비 완료
-5. read-only Codex의 독립 사실 검증과 사유 기록
-6. workspace-write Codex의 최소 수정
-7. 의존성 선언 변경 시 환경 준비 갱신
-8. 경로·파일 수·line 수·symlink·binary 정책 검사
-9. 대상 저장소 하네스 실행
-10. read-only Codex의 수정 결과 검증과 사유 기록
+5. read-only Codex 한 번으로 모든 finding의 독립 사실 검증과 fingerprint별 사유 기록
+6. 오탐 finding만 개별 `rejected` 처리
+7. 같은 파일 finding을 한 변경 그룹으로 합친 workspace-write Codex 수정
+8. 의존성 선언 변경 시 환경 준비 갱신
+9. 경로·파일 수·line 수·symlink·binary 정책 검사
+10. 대상 저장소 하네스 한 번 실행
+11. read-only Codex의 배치 결과 검증과 fingerprint별 사유 기록
+
+정책·하네스·결과 검증에 실패하면 기존 diff와 실패 출력을 같은 worktree의 다음 배치 수정에 전달한다. 두 번째 실패부터 원인 그룹을 진단하며, 특정 그룹을 찾으면 해당 그룹만 finding 모드로 분리한다.
 
 Codex 수정 직전, 환경 준비 명령 전후와 하네스 실행 직전에 worktree 권한을 다시 확인한다. 도구가 파일을 read-only로 바꿨으면 같은 worktree에서 소유자 권한을 복구하고 `worktree_permissions_repaired` event에 단계와 파일·디렉터리 수를 남긴다. 권한 확인이나 쓰기 probe가 실패하면 수정·commit·push를 진행하지 않는다.
 
@@ -200,11 +205,11 @@ Codex와 테스트 환경에서는 GitHub token, 일반적인 token·secret·pas
 
 ## 6. fix commit 생성
 
-초기 정책·테스트·수정 결과 검증을 통과하면 수정분을 commit한다. read-only Codex는 수정 결과를 검증하면서 대상 저장소의 `AGENTS.md`와 실제 diff에 맞는 commit 제목을 함께 만든다. 제목의 type은 변경 종류, scope는 실제 하위 시스템, 설명은 달라진 동작을 나타내야 한다. fingerprint나 `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 표기는 거부한다.
+초기 정책·테스트·수정 결과 검증을 통과하면 변경 그룹별로 수정분을 나눠 commit한다. 같은 파일 finding은 commit 하나를 공유하고 모든 fingerprint가 같은 결과 commit을 가리킨다. read-only Codex는 그룹별 실제 diff와 대상 저장소의 `AGENTS.md`에 맞는 commit 제목을 만든다. 제목의 type은 변경 종류, scope는 실제 하위 시스템, 설명은 달라진 동작을 나타내야 한다. fingerprint나 `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 표기는 거부한다.
 
 `commit_message_template`의 첫 줄은 Codex가 만든 제목으로 교체하고 설정된 본문은 유지한다. 새 template은 첫 줄에 `{title}`을 사용한다. `{title}`이 없는 기존 template도 같은 방식으로 첫 줄을 교체하므로 설정을 바로 마이그레이션하지 않아도 된다.
 
-`direct`에서는 detached HEAD 상태로 commit하므로 별도 local branch를 남기지 않는다.
+`direct`에서는 detached HEAD에 그룹별 commit chain을 만들므로 별도 local branch를 남기지 않는다. 각 commit을 만들기 전에 해당 그룹 파일만 stage됐는지 확인하고, 마지막 commit의 tree가 배치 검증을 통과한 tree와 같은지 검사한다.
 
 ```bash
 git add --all
@@ -224,7 +229,7 @@ autofix/<repository-id>/<fingerprint 앞 12자리>
 
 ## 7. 원격 이동 감지와 merge
 
-commit 뒤 `origin/dev`를 다시 fetch한다. 현재 원격 commit이 workspace base와 같으면 push 단계로 간다. 다르면 `target_moved` event를 남기고 worktree에서 최신 target을 merge한다.
+각 commit을 push하기 전에 `origin/dev`를 다시 fetch한다. 현재 원격 commit이 해당 commit의 parent와 같으면 push 단계로 간다. 다르면 `target_moved` event를 남기고 worktree의 남은 배치와 최신 target을 merge한다.
 
 ```bash
 git -c user.name="broken-agent" \
@@ -275,24 +280,24 @@ git -c user.name="broken-agent" \
 
 ## 8. merge 후 전체 재검증
 
-원격 target을 merge하면 최신 target commit을 새 workspace base로 바꾼다. 새 base 대비 agent 변경분만 다시 검사한다.
+원격 target을 merge하면 최신 target commit을 새 workspace base로 바꾼다. 이미 push한 finding을 포함한 배치 전체 결과를 다시 검사한다.
 
 1. diff 경로와 변경량 정책 재검사
 2. 저장소 하네스 전체 재실행
 3. 하네스가 tracked 파일을 바꾸지 않았는지 확인
-4. read-only Codex의 원인 해소·회귀 여부 재검증
+4. read-only Codex의 fingerprint별 원인 해소·회귀 여부 재검증
 
-모두 통과하면 `merged_fix_revalidated` event를 남긴다. 검증 중 원격 target이 또 이동하면 merge와 재검증을 반복한다. 반복 횟수는 `max_remote_merge_attempts`로 제한하며 기본값은 3이다.
+모두 통과하면 최신 target을 parent로 삼도록 남은 변경을 다시 그룹별 commit하고 `merged_fix_revalidated` event를 남긴다. 검증 중 원격 target이 또 이동하면 merge와 재검증을 반복한다. 반복 횟수는 `max_remote_merge_attempts`로 제한하며 기본값은 3이다.
 
 ## 9. 작업별 push
 
 `direct` 설정은 다음 형태로 push한다.
 
 ```bash
-git push origin HEAD:refs/heads/dev
+git push origin <finding-group-commit>:refs/heads/dev
 ```
 
-force push와 `--set-upstream`은 사용하지 않는다. push 직전과 직후에는 각각 `push_started`, `push_completed` event를 기록한다.
+force push와 `--set-upstream`은 사용하지 않는다. 그룹 commit을 앞에서부터 하나씩 push하며 push 직전과 직후에는 각각 `push_started`, `push_completed` event를 그룹의 모든 finding에 기록한다.
 
 fetch와 push 사이에 원격이 이동해 non-fast-forward가 발생하면 최신 target을 다시 fetch한다. 변경된 commit을 merge하고 8단계 검증을 다시 통과한 뒤 push를 재시도한다. 원격 HEAD가 이미 worktree 결과 commit이면 앞선 push가 성공하고 응답만 유실된 것으로 간주한다.
 
@@ -338,6 +343,8 @@ git -C /configured/local_path worktree list --porcelain
 | `details_json` | commit, 경로, 충돌 파일과 판단 사유 |
 | `created_at` | UTC ISO 8601 시각 |
 
+`batch_runs`는 `batch_id`, 상태, 시도 횟수, Codex 호출 수, 입력·cache·출력·reasoning·전체 token, 누적 실행 시간과 마지막 오류를 보관한다. token 값은 Codex JSONL의 `turn.completed.usage`를 합산하며 지원되지 않는 항목은 `0`으로 남긴다.
+
 작업 하나의 이력을 조회한다.
 
 ```bash
@@ -371,7 +378,7 @@ git -C /configured/local_path worktree list --porcelain
 - event ID, job ID, repository, branch, finding과 구조화 세부 정보 포함
 - embed 전체 약 5,500자 이내 제한
 
-기본 알림 후보는 finding 검증 시작·완료, 수정 시작·수정안 생성 완료, 같은 worktree의 검증 실패 보완, 프로세스 재시도 예정, 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·최종 `failed` 상태다. 재시도 시각이 있는 실패는 최종 실패 알림을 보내지 않는다. 검증과 수정 단계 알림은 해당 event 기록 직후 전송을 시도한다. 나머지 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
+기본 알림 후보는 finding·배치 검증 시작과 완료, 수정 시작, 결과 검증 시작과 완료, 같은 worktree의 보완, 문제 finding 분리, 프로세스 재시도 예정, 정책 제외, target 이동, merge 충돌 감지·해결, push 완료, worktree 정리 실패와 `completed`·`rejected`·최종 `failed` 상태다. 재시도 시각이 있는 실패는 최종 실패 알림을 보내지 않는다. 검증과 수정 단계 알림은 해당 event 기록 직후 전송을 시도한다. 나머지 내부 진행 event는 formatter가 빈 payload를 반환하고 커서만 전진한다.
 
 sender는 `code-review-agent`와 같은 운영 규칙을 따른다.
 
@@ -393,23 +400,24 @@ sender는 `code-review-agent`와 같은 운영 규칙을 따른다.
 
 ```text
 job_created
-job_claimed
-processing_started
+batch_claimed
+batch_processing_started
 worktree_created
 finding_git_validated
-status_changed: fixing
-fix_applied
-retry_scheduled
-diff_validated
+batch_validation_started
+batch_validation_completed
+batch_fix_started
 status_changed: testing
+result_validation_started
+result_validation_completed
 status_changed: ready
-fix_committed
 [target_moved → target_merged 또는 merge_conflict_* → 재검증]
-push_started
-push_completed
+finding 그룹별 push_started
+finding 그룹별 push_completed
 status_changed: pushed
 worktree_removed
 status_changed: completed
+batch_metrics_recorded
 ```
 
 정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.

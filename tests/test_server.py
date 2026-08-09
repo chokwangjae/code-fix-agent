@@ -15,6 +15,7 @@ class IntakeApplicationTest(unittest.TestCase):
             config_path.write_text(self._config(), encoding="utf-8")
             result = IntakeApplication(load_config(config_path)).submit(event())
         self.assertEqual(result["created"], 1)
+        self.assertIsNone(result["batch_id"])
 
     def test_rejects_unconfigured_repository(self) -> None:
         value = event()

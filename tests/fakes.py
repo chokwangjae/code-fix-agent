@@ -31,6 +31,8 @@ def job(**overrides: object) -> Job:
         "fix_branch": None,
         "result_commit": None,
         "pr_url": None,
+        "batch_id": None,
+        "fallback_finding": 0,
         "created_at": now,
         "updated_at": now,
     }

@@ -67,21 +67,33 @@ class CrontrolReporter:
         current = next((job for job in jobs if job.id == current_job_id), None)
         if current_job_id is not None and current is None:
             raise FixAgentError(f"job does not exist: {current_job_id}")
-        running_jobs = [job for job in jobs if job.status in _RUNNING_STATUSES]
-        running_ids = {job.id for job in running_jobs}
+        raw_running_jobs = [job for job in jobs if job.status in _RUNNING_STATUSES]
+        running_ids = {job.id for job in raw_running_jobs}
         self._stages = {
             job_id: value
             for job_id, value in self._stages.items()
             if job_id in running_ids
         }
         if current is None or current.id not in running_ids:
-            current = running_jobs[-1] if running_jobs else current
+            current = raw_running_jobs[-1] if raw_running_jobs else current
+        running_by_unit: dict[tuple[str, object], Job] = {}
+        for job in raw_running_jobs:
+            running_by_unit.setdefault(_execution_key(job), job)
+        if current is not None and current.id in running_ids:
+            running_by_unit[_execution_key(current)] = current
+        running_jobs = list(running_by_unit.values())
         retryable = {
             job.id
             for job in jobs
             if job.status == "failed" and self._retryable(job)
         }
-        queued = sum(job.status == "queued" or job.id in retryable for job in jobs)
+        queued = len(
+            {
+                _execution_key(job)
+                for job in jobs
+                if job.status == "queued" or job.id in retryable
+            }
+        )
         latest_terminal = next(
             (
                 job
@@ -205,6 +217,12 @@ def _status_stage(status: str) -> str:
         "skipped": "정책 제외",
         "failed": "실패",
     }.get(status, status)
+
+
+def _execution_key(job: Job) -> tuple[str, object]:
+    if job.batch_id and not job.fallback_finding:
+        return "batch", job.batch_id
+    return "job", job.id
 
 
 def _token(config: CrontrolConfig) -> str | None:
