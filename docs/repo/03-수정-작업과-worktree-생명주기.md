@@ -156,7 +156,7 @@ git worktree add --detach \
 
 ## 4. 환경 준비
 
-Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서대로 실행한다. 각 명령은 shell을 통하지 않는 argument 배열이며 Codex·하네스와 같은 비밀값 제거 환경을 사용한다. 한 명령이 실패하면 처음부터 다시 실행하며 `setup_max_attempts`와 `setup_retry_delay_seconds`로 횟수와 간격을 정한다.
+Git 검증을 통과한 worktree에서 저장소별 `setup_commands`를 순서대로 실행한다. 각 명령은 shell을 통하지 않는 argument 배열이며 Codex·하네스와 같은 비밀값 제거 환경을 사용한다. 한 명령이 실패하면 처음부터 다시 실행하며 `setup_max_attempts`와 `setup_retry_delay_seconds`로 횟수와 간격을 정한다. Codex, 준비 명령, 하네스와 Git 명령이 `command_timeout_seconds`를 넘기면 해당 프로세스 그룹에 `TERM`을 보내고 2초 뒤에도 남은 프로세스는 `KILL`로 끝낸다. 자식 빌드가 worktree를 계속 수정하는 상태로 남지 않아야 다음 보완을 시작한다.
 
 도구 cache는 저장소별 `state_dir/runtime-cache/<repository-key>` 아래에 둔다. 사용자 `HOME`은 그대로 유지한다.
 

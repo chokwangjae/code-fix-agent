@@ -123,6 +123,8 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 worktree 생성 직후 Git이 추적하는 파일과 디렉터리에 현재 실행 사용자의 읽기·쓰기 권한을 보장하고 쓰기 probe를 실행한다. Codex 수정 전, 환경 준비 명령 전후, 하네스 실행 전과 worktree 제거 전에도 같은 검사를 반복한다. 설치 cache는 `.fix-agent/runtime-cache/<repository-key>` 아래에 분리하며 `HOME`과 원본 저장소 `local_path`의 권한은 바꾸지 않는다.
 
+`command_timeout_seconds`를 넘긴 Codex·하네스·Git 명령은 자식까지 포함한 프로세스 그룹을 종료해 worktree를 계속 바꾸는 백그라운드 프로세스를 남기지 않는다.
+
 ```toml
 [[repositories]]
 setup_commands = [
