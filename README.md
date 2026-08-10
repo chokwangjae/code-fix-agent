@@ -121,7 +121,7 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `setup_commands`는 새 worktree를 만든 뒤 Codex 검증보다 먼저 실행한다. 준비 명령이 실패하면 `setup_max_attempts`만큼 같은 worktree에서 재시도한다. `setup_watch_paths`에 지정한 lockfile이나 빌드 설정이 수정 또는 원격 merge로 바뀌면 하네스 전에 준비 명령을 다시 실행한다. 명령은 shell 문자열이 아닌 argument 배열로 지정한다. 설치 도구가 lockfile이나 프로젝트 파일을 다시 쓰면 실행 전 내용을 복원해 수정 diff와 분리한다.
 
-worktree 생성 직후 Git이 추적하는 파일과 디렉터리에 현재 실행 사용자의 읽기·쓰기 권한을 보장하고 쓰기 probe를 실행한다. Codex 수정 전, 환경 준비 명령 전후, 하네스 실행 전과 worktree 제거 전에도 같은 검사를 반복한다. 설치 cache는 `.fix-agent/runtime-cache/<repository-key>` 아래에 분리하며 `HOME`과 원본 저장소 `local_path`의 권한은 바꾸지 않는다.
+worktree 생성 직후 Git이 추적하는 파일과 디렉터리에 현재 실행 사용자의 읽기·쓰기 권한을 보장하고 쓰기 probe를 실행한다. 삭제된 tracked 파일의 부모 경로가 이미 없어졌다면 권한 검사에서 제외한다. Codex 수정 전, 환경 준비 명령 전후, 하네스 실행 전과 worktree 제거 전에도 같은 검사를 반복한다. 설치 cache는 `.fix-agent/runtime-cache/<repository-key>` 아래에 분리하며 `HOME`과 원본 저장소 `local_path`의 권한은 바꾸지 않는다.
 
 `command_timeout_seconds`를 넘긴 Codex·하네스·Git 명령은 자식까지 포함한 프로세스 그룹을 종료해 worktree를 계속 바꾸는 백그라운드 프로세스를 남기지 않는다.
 

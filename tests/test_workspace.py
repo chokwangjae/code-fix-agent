@@ -252,6 +252,36 @@ allow_new_files = true
                     Path(environment["TMPDIR"]).is_relative_to(workspace.root)
                 )
 
+    def test_ignores_missing_parent_of_deleted_tracked_file(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = self._repository(root)
+            config = self._config(root, repository_path)
+            work_job = job(
+                baseline_commit=baseline,
+                target_commit=target,
+                introducing_commit=target,
+                file="src/app.py",
+            )
+            with FixWorkspace(
+                CommandRunner(), config.repositories[0], work_job, config.state_dir
+            ) as workspace:
+                deleted = workspace.path / "generated/signatures/CodeResources"
+                deleted.parent.mkdir(parents=True)
+                deleted.write_text("tracked\n", encoding="utf-8")
+                subprocess.run(
+                    ["git", "add", "generated/signatures/CodeResources"],
+                    cwd=workspace.path,
+                    check=True,
+                )
+                deleted.unlink()
+                deleted.parent.rmdir()
+                deleted.parent.parent.rmdir()
+
+                permissions = workspace.ensure_writable()
+
+        self.assertGreaterEqual(permissions.checked_directories, 1)
+
     def test_reconciles_recorded_worktree_after_push_cleanup_failure(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -306,7 +306,8 @@ class FixWorkspace:
             candidate = self.path / file
             parent = candidate.parent
             while parent != self.path:
-                directories.add(parent)
+                if parent.is_dir():
+                    directories.add(parent)
                 parent = parent.parent
             if candidate.is_symlink() or not candidate.exists():
                 continue
@@ -356,6 +357,9 @@ class FixWorkspace:
                 return 1
             if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
                 raise FixAgentError(f"directory remains inaccessible: {path}")
+            return 0
+        except FileNotFoundError:
+            # A tracked file can disappear with its parent during a concurrent edit.
             return 0
         except OSError as exc:
             raise FixAgentError(f"cannot make directory writable: {path}: {exc}") from exc

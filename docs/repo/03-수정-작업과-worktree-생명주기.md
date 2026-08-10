@@ -150,7 +150,7 @@ git worktree add --detach \
 
 이 시점에는 수정 branch를 만들지 않는다. 원래 checkout의 현재 branch와 작업 파일도 바꾸지 않는다. 생성 경로, remote, target branch와 base commit은 `worktree_created` event에 남긴다.
 
-생성 직후에는 Git이 추적하는 파일과 Git이 무시하지 않는 새 파일만 확인한다. 일반 파일에는 소유자 읽기·쓰기 권한을, 상위 디렉터리에는 소유자 읽기·쓰기·실행 권한을 보장한다. 기존 실행 bit는 유지하고 symlink 대상의 mode는 바꾸지 않는다. checkout root에 임시 파일을 만들었다가 지우는 쓰기 probe까지 통과해야 다음 단계로 간다. 검사 수, 보정 수와 cache 경로는 `worktree_permissions_ready` event에 남긴다.
+생성 직후에는 Git이 추적하는 파일과 Git이 무시하지 않는 새 파일만 확인한다. 일반 파일에는 소유자 읽기·쓰기 권한을, 상위 디렉터리에는 소유자 읽기·쓰기·실행 권한을 보장한다. 삭제된 tracked 파일의 부모 디렉터리까지 이미 사라졌다면 검사 대상에서 제외하며, 검사 도중 경로가 사라지는 경우도 삭제 작업으로 처리한다. 기존 실행 bit는 유지하고 symlink 대상의 mode는 바꾸지 않는다. checkout root에 임시 파일을 만들었다가 지우는 쓰기 probe까지 통과해야 다음 단계로 간다. 검사 수, 보정 수와 cache 경로는 `worktree_permissions_ready` event에 남긴다.
 
 권한 변경 범위는 에이전트가 만든 `state_dir/worktrees/fix-*/checkout`과 `state_dir/runtime-cache`뿐이다. 원본 저장소 `local_path`, 다른 checkout, Git 공용 metadata와 사용자 홈의 권한은 바꾸지 않는다.
 
