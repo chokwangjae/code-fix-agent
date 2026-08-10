@@ -1,7 +1,9 @@
 from dataclasses import replace
 from pathlib import Path
 import subprocess
+import threading
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
 
@@ -343,6 +345,79 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_serializes_pushes_for_the_same_repository_branch(self) -> None:
+        class ConcurrentPushRunner(CommandRunner):
+            def __init__(self):
+                self.guard = threading.Lock()
+                self.active = 0
+                self.maximum_active = 0
+
+            def run(self, command, **kwargs):
+                values = list(command)
+                if values == ["git", "remote", "get-url", "origin"] or values == [
+                    "git",
+                    "remote",
+                    "get-url",
+                    "--push",
+                    "origin",
+                ]:
+                    return CommandResult("https://github.com/owner/repo.git\n", "", 0)
+                if values[:2] == ["git", "push"]:
+                    with self.guard:
+                        self.active += 1
+                        self.maximum_active = max(self.maximum_active, self.active)
+                    time.sleep(0.05)
+                    with self.guard:
+                        self.active -= 1
+                    return CommandResult("", "", 0)
+                raise AssertionError(f"unexpected command: {command}")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{root / 'repo'}"
+publish_mode = "direct"
+github_token = "test-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            runner = ConcurrentPushRunner()
+            workers = [
+                FixWorker(config, runner, FakeAgent()),
+                FixWorker(config, runner, FakeAgent()),
+            ]
+            threads = [
+                threading.Thread(
+                    target=worker._push_commit,
+                    args=(
+                        config.repositories[0],
+                        root,
+                        {},
+                        "main",
+                        "a" * 40,
+                    ),
+                )
+                for worker in workers
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(runner.maximum_active, 1)
+
     def test_rejects_push_url_that_differs_from_configured_repository(self) -> None:
         class RemoteRunner(CommandRunner):
             def run(self, command, **kwargs):

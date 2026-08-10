@@ -114,6 +114,8 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 리뷰 배치 또는 finding 작업과 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
+Codex 수정, 환경 준비, 하네스는 작업별 worktree에서 병렬로 실행한다. 원격 target 확인, merge, checkpoint push는 `github`와 `target_branch` 조합별로 한 worker만 수행한다. 다른 저장소나 branch의 publish는 서로 막지 않는다.
+
 운영 중 새 작업 claim만 멈출 때는 `pause`를 사용한다. 이미 실행 중인 작업은 현재 단계를 마칠 때까지 유지한다. `resume`은 대기 작업 claim을 다시 허용하며 프로세스를 재시작할 필요가 없다. `worker-status`로 저장된 상태와 사유를 확인한다.
 
 ```bash

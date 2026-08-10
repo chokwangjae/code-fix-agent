@@ -104,7 +104,7 @@ max_concurrent_jobs = 3
 
 허용 범위는 `1..32`다. `run-once`와 `submit --run-now`는 이 값과 관계없이 호출당 한 건만 처리한다.
 
-같은 `local_path`를 쓰는 worker의 clone, fetch, worktree 등록·제거와 prune은 Git 공용 메타데이터 충돌을 막기 위해 짧게 직렬화한다. worktree 생성 뒤 Codex 수정과 하네스 실행은 서로 겹쳐서 진행한다. push는 작업별로 시도하며 원격 선행 변경은 target 이동 절차에서 처리한다.
+같은 `local_path`를 쓰는 worker의 clone, fetch, worktree 등록·제거와 prune은 Git 공용 메타데이터 충돌을 막기 위해 짧게 직렬화한다. worktree 생성 뒤 Codex 수정과 하네스 실행은 서로 겹쳐서 진행한다. 원격 target 확인, merge, checkpoint push 구간은 `github`와 `target_branch` 조합별 재진입 잠금으로 직렬화한다. 한 worker가 publish를 마친 뒤 다음 worker가 최신 target을 확인하므로 같은 branch를 처리하는 세 작업이 서로 연속 merge를 유발하는 횟수를 줄인다. 저장소나 branch가 다르면 publish도 병렬로 실행한다.
 
 ## 1. 로컬 저장소 준비
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import json
 import math
 import os
@@ -66,6 +67,28 @@ _CRONTROL_EVENT_STAGES = {
     "push_started": "push 중",
     "push_completed": "push 완료",
 }
+
+_PUBLISH_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_PUBLISH_LOCKS_GUARD = threading.Lock()
+
+
+def _publish_lock(repository: RepositoryConfig) -> threading.RLock:
+    key = (repository.github.casefold(), repository.target_branch)
+    with _PUBLISH_LOCKS_GUARD:
+        return _PUBLISH_LOCKS.setdefault(key, threading.RLock())
+
+
+def _serialized_publish(repository_index: int):
+    def decorate(method):
+        @wraps(method)
+        def locked(self, *args, **kwargs):
+            repository = args[repository_index]
+            with _publish_lock(repository):
+                return method(self, *args, **kwargs)
+
+        return locked
+
+    return decorate
 
 
 @dataclass
@@ -806,6 +829,7 @@ class FixWorker:
                 iteration += 1
         return (), [], None, tuple(pending_fallbacks)
 
+    @_serialized_publish(1)
     def _resume_batch_publish(
         self,
         batch: BatchClaim,
@@ -945,6 +969,7 @@ class FixWorker:
                 f"batch:{batch.id}", checkpoint.fingerprints
             )
 
+    @_serialized_publish(1)
     def _publish_batch_groups(
         self,
         batch: BatchClaim,
@@ -1292,6 +1317,7 @@ class FixWorker:
                 if prepared is None:
                     return
                 branch, commit, summary, tests, decision, postcheck = prepared
+            workspace.hold_publish_lock(_publish_lock(repository))
             remote_merges = 0
             while True:
                 current = workspace.fetch_target_head()
@@ -1991,6 +2017,7 @@ class FixWorker:
     ) -> None:
         self._push_commit(repository, workspace, environment, branch, "HEAD")
 
+    @_serialized_publish(0)
     def _push_commit(
         self,
         repository: RepositoryConfig,

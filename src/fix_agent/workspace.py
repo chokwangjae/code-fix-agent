@@ -111,6 +111,7 @@ class FixWorkspace:
         self.base_commit: str | None = None
         self.cleanup_complete: bool | None = None
         self._preserve_on_exit = False
+        self._held_publish_lock: threading.RLock | None = None
         self._github_token_loaded = False
         self._github_token: str | None = None
         self._cache_environment: dict[str, str] | None = None
@@ -1135,6 +1136,14 @@ class FixWorkspace:
             },
         )
 
+    def hold_publish_lock(self, lock: threading.RLock) -> None:
+        if self._held_publish_lock is lock:
+            return
+        if self._held_publish_lock is not None:
+            raise FixAgentError("worktree already holds a different publish lock")
+        lock.acquire()
+        self._held_publish_lock = lock
+
     def close(self) -> None:
         remove_returncode: int | None = None
         permission_error: str | None = None
@@ -1204,8 +1213,13 @@ class FixWorkspace:
         return self
 
     def __exit__(self, *_: object) -> None:
-        if not self._preserve_on_exit:
-            self.close()
+        try:
+            if not self._preserve_on_exit:
+                self.close()
+        finally:
+            if self._held_publish_lock is not None:
+                self._held_publish_lock.release()
+                self._held_publish_lock = None
 
 
 def reconcile_recorded_worktree(
