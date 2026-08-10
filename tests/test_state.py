@@ -10,6 +10,54 @@ from test_contract import event
 
 
 class StateTest(unittest.TestCase):
+    def test_pause_blocks_claim_until_resume(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                state.set_worker_paused(True, "maintenance")
+                paused = state.worker_control()
+                blocked = state.claim_next(config.repositories)
+                state.set_worker_paused(False)
+                resumed = state.claim_next(config.repositories)
+
+        self.assertTrue(paused.paused)
+        self.assertEqual(paused.reason, "maintenance")
+        self.assertIsNone(blocked)
+        self.assertIsNotNone(resumed)
+
+    def test_migrates_legacy_pause_trigger(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                state.connection.execute(
+                    """
+                    CREATE TRIGGER manual_pause_claims_20260810
+                    BEFORE UPDATE OF status ON jobs
+                    BEGIN
+                        SELECT RAISE(ABORT, 'code-fix-agent manually paused');
+                    END
+                    """
+                )
+                state.connection.commit()
+            with StateStore(config.state_dir) as state:
+                control = state.worker_control()
+                trigger = state.connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'trigger' AND name = 'manual_pause_claims_20260810'
+                    """
+                ).fetchone()
+
+        self.assertTrue(control.paused)
+        self.assertIsNone(trigger)
+
     def test_claims_review_event_as_one_batch_and_records_metrics(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

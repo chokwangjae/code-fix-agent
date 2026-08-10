@@ -97,10 +97,14 @@ class FixWorker:
 
     def run_once(self) -> bool:
         with StateStore(self.config.state_dir) as state:
-            batch = state.claim_next_batch(self.config.repositories)
-            job = None if batch is not None else state.claim_next(
-                self.config.repositories
-            )
+            if state.worker_control().paused:
+                batch = None
+                job = None
+            else:
+                batch = state.claim_next_batch(self.config.repositories)
+                job = None if batch is not None else state.claim_next(
+                    self.config.repositories
+                )
         if batch is not None:
             return self._run_batch(batch)
         if job is None:
@@ -188,7 +192,12 @@ class FixWorker:
 
     def run_forever(self, poll_seconds: float = 2.0) -> None:
         while not self._stop.is_set():
-            if not self.run_once():
+            try:
+                processed = self.run_once()
+            except Exception as exc:
+                print(f"worker loop recovered from an unexpected error: {exc}")
+                processed = False
+            if not processed:
                 self._stop.wait(poll_seconds)
 
     def stop(self) -> None:

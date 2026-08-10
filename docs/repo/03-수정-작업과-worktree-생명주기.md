@@ -425,3 +425,9 @@ batch_metrics_recorded
 ```
 
 정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 반복 실패 finding은 배치 정리 중 `fallback_pending`, 정리 후 `queued`로 전환한다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim하며, pending finding은 `fallback_recovery_scheduled` 뒤 개별 worktree에서 시작한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.
+
+## Worker pause와 오류 복구
+
+`fix-agent pause --config fix-agent.toml --reason "사유"`는 SQLite의 `worker_control`에 pause 상태를 저장한다. worker는 실행 중인 작업을 강제로 끊지 않고 다음 job 또는 batch claim부터 멈춘다. `worker-status`로 상태를 확인하고 `resume`으로 claim을 재개한다. 세 명의 worker가 같은 상태를 읽으므로 프로세스 재시작은 필요 없다.
+
+이전 운영 방식에서 사용한 `manual_pause_claims_20260810` SQLite trigger는 DB schema 초기화 시 pause 상태로 이전한 뒤 제거한다. trigger가 claim의 `UPDATE`를 예외로 끊어 worker thread까지 종료하던 경로를 없애기 위한 이전 절차다. worker loop는 `run_once()` 밖의 예외를 기록하고 poll을 계속하므로 일시적인 SQLite 오류 하나가 해당 worker를 영구 중단시키지 않는다.

@@ -114,6 +114,16 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 리뷰 배치 또는 finding 작업과 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
+운영 중 새 작업 claim만 멈출 때는 `pause`를 사용한다. 이미 실행 중인 작업은 현재 단계를 마칠 때까지 유지한다. `resume`은 대기 작업 claim을 다시 허용하며 프로세스를 재시작할 필요가 없다. `worker-status`로 저장된 상태와 사유를 확인한다.
+
+```bash
+.venv/bin/fix-agent pause --config fix-agent.toml --reason "하네스 점검"
+.venv/bin/fix-agent worker-status --config fix-agent.toml --json
+.venv/bin/fix-agent resume --config fix-agent.toml
+```
+
+이전 운영 DB에 `manual_pause_claims_20260810` trigger가 있으면 최초 실행 때 정식 pause 상태로 이전한 뒤 trigger를 제거한다. worker loop는 claim과 상태 DB에서 예상하지 못한 오류가 발생해도 종료되지 않고 다음 poll에서 다시 확인한다.
+
 `processing_mode = "review_batch"`는 이벤트의 finding을 한 worktree에서 함께 사실 검증하고 수정한다. 서버가 finding 파일별 최소 변경 그룹을 먼저 정하고, 같은 파일이나 공용 지원 파일로 연결된 그룹을 합친다. Codex가 여러 finding 파일을 한 그룹에 담아도 계약 오류로 중단하지 않는다. 다른 그룹은 각각 commit한 뒤 target branch에 순서대로 push한다. 오탐만 fingerprint별 `rejected`로 끝낸다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 배치 전체를 보완한다. 반복 실패 원인이 특정 그룹으로 좁혀지면 그 그룹만 기존 finding 처리 방식으로 돌린다. fallback finding은 배치 worktree 정리가 끝날 때까지 `fallback_pending`에 두고, 정리 후 개별 처리 대기열에 공개한다. 이전 방식이 필요하면 저장소별 `processing_mode = "finding"`으로 되돌린다. 배치 모드는 finding별 순차 push가 필요한 `publish_mode = "direct"`에서만 사용할 수 있다.
 
 프로세스를 재시작하면 `validating`, `fixing`, `testing`, `ready`, `pushed`, `fallback_pending` 상태였던 job을 자동 복구한다. 재시작은 시도 횟수를 늘리지 않는다. 기록된 worktree가 남아 있으면 미커밋 diff와 생성된 commit을 포함한 현재 상태에서 수정을 이어가고, worktree가 없으면 최신 target에서 다시 시작한다. 일반 작업 복구는 `restart_recovery_scheduled`, `worktree_resumed` event로 남고 pending fallback 복구는 `fallback_recovery_scheduled`로 남는다.

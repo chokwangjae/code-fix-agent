@@ -103,6 +103,13 @@ class DiscordCursor:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class WorkerControl:
+    paused: bool
+    reason: str | None
+    updated_at: str
+
+
 class StateStore:
     def __init__(self, state_dir: Path) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +208,42 @@ class StateStore:
         )
         self.connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS worker_control (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                paused INTEGER NOT NULL DEFAULT 0,
+                reason TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO worker_control (id, paused, reason, updated_at)
+            VALUES (1, 0, NULL, ?)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (_now(),),
+        )
+        legacy_pause = self.connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'manual_pause_claims_20260810'
+            """
+        ).fetchone()
+        if legacy_pause is not None:
+            self.connection.execute(
+                """
+                UPDATE worker_control
+                SET paused = 1, reason = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                ("migrated from manual_pause_claims_20260810", _now()),
+            )
+            self.connection.execute(
+                "DROP TRIGGER IF EXISTS manual_pause_claims_20260810"
+            )
+        self.connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS job_events_job_id_id
             ON job_events (job_id, id)
             """
@@ -226,6 +269,26 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS jobs_batch_id ON jobs (batch_id, id)"
         )
         self.connection.commit()
+
+    def worker_control(self) -> WorkerControl:
+        row = self.connection.execute(
+            "SELECT paused, reason, updated_at FROM worker_control WHERE id = 1"
+        ).fetchone()
+        if row is None:  # pragma: no cover - schema initialization guarantees the row
+            raise sqlite3.DatabaseError("worker control row does not exist")
+        return WorkerControl(bool(row["paused"]), row["reason"], row["updated_at"])
+
+    def set_worker_paused(self, paused: bool, reason: str | None = None) -> None:
+        normalized_reason = reason.strip() if reason and reason.strip() else None
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE worker_control
+                SET paused = ?, reason = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (int(paused), normalized_reason if paused else None, _now()),
+            )
 
     def accept(self, repository: RepositoryConfig, event: ReviewEvent) -> IntakeResult:
         now = datetime.now(timezone.utc).isoformat()
@@ -483,6 +546,9 @@ class StateStore:
         now = _now()
         try:
             self.connection.execute("BEGIN IMMEDIATE")
+            if self.worker_control().paused:
+                self.connection.commit()
+                return None
             rows = self.connection.execute(
                 """
                 SELECT * FROM jobs
@@ -547,6 +613,9 @@ class StateStore:
         now = _now()
         try:
             self.connection.execute("BEGIN IMMEDIATE")
+            if self.worker_control().paused:
+                self.connection.commit()
+                return None
             rows = self.connection.execute(
                 """
                 SELECT * FROM jobs

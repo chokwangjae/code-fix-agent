@@ -14,6 +14,32 @@ from test_state import StateTest
 
 
 class CliTest(unittest.TestCase):
+    def test_pause_status_and_resume_commands(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fix.toml"
+            config_path.write_text(StateTest._config(), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                paused = main(
+                    [
+                        "pause",
+                        "--config",
+                        str(config_path),
+                        "--reason",
+                        "maintenance",
+                    ]
+                )
+                status = main(
+                    ["worker-status", "--config", str(config_path), "--json"]
+                )
+                resumed = main(["resume", "--config", str(config_path)])
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual((paused, status, resumed), (0, 0, 0))
+        self.assertEqual(lines[0], "paused: maintenance")
+        self.assertTrue(json.loads(lines[1])["paused"])
+        self.assertEqual(lines[2], "running")
+
     def test_events_json_uses_global_cursor_and_structured_details(self) -> None:
         with TemporaryDirectory() as directory:
             config_path = Path(directory) / "fix.toml"

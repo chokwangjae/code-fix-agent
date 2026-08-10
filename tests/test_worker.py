@@ -313,6 +313,43 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_worker_loop_survives_unexpected_claim_error(self) -> None:
+        class RecoveringWorker(FixWorker):
+            def __init__(self, config):
+                super().__init__(config, CommandRunner(), FakeAgent())
+                self.calls = 0
+
+            def run_once(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("claim failed")
+                self.stop()
+                return False
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                """
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "repo"
+github_token = "test-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            worker = RecoveringWorker(load_config(config_path))
+            worker.run_forever(poll_seconds=0)
+
+        self.assertEqual(worker.calls, 2)
+
     def test_os_conditional_command_only_passes_on_a_different_host(self) -> None:
         class RecordingRunner(CommandRunner):
             def __init__(self) -> None:

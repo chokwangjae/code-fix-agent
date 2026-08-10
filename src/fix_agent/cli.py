@@ -46,6 +46,23 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run-once", help="process one queued fix job")
     run_parser.add_argument("--config", required=True, type=Path)
 
+    pause_parser = subparsers.add_parser(
+        "pause", help="stop workers from claiming another job"
+    )
+    pause_parser.add_argument("--config", required=True, type=Path)
+    pause_parser.add_argument("--reason")
+
+    resume_parser = subparsers.add_parser(
+        "resume", help="allow workers to claim queued jobs"
+    )
+    resume_parser.add_argument("--config", required=True, type=Path)
+
+    control_parser = subparsers.add_parser(
+        "worker-status", help="show whether job claims are paused"
+    )
+    control_parser.add_argument("--config", required=True, type=Path)
+    control_parser.add_argument("--json", action="store_true")
+
     notify_parser = subparsers.add_parser(
         "notify-once", help="deliver pending Discord job events"
     )
@@ -84,6 +101,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run-once":
             processed = FixWorker(config).run_once()
             print("processed one job" if processed else "no queued jobs")
+            return 0
+        if args.command in {"pause", "resume", "worker-status"}:
+            with StateStore(config.state_dir) as state:
+                if args.command == "pause":
+                    state.set_worker_paused(True, args.reason)
+                elif args.command == "resume":
+                    state.set_worker_paused(False)
+                control = state.worker_control()
+            payload = asdict(control)
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                status = "paused" if control.paused else "running"
+                suffix = f": {control.reason}" if control.reason else ""
+                print(status + suffix)
             return 0
         if args.command == "notify-once":
             if args.max_events < 1:
