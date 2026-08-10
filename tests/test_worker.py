@@ -13,6 +13,7 @@ from fix_agent.codex_agent import (
 from fix_agent.command import CommandResult, CommandRunner
 from fix_agent.config import load_config
 from fix_agent.contract import parse_review_event
+from fix_agent.errors import FixAgentError
 from fix_agent.state import StateStore
 from fix_agent.worker import FixWorker
 from test_workspace import WorkspaceTest
@@ -188,6 +189,22 @@ class BatchAgent(FakeAgent):
         )
 
 
+class ContractFailureBatchAgent(BatchAgent):
+    def apply_batch_fixes(
+        self,
+        repository,
+        jobs,
+        workspace,
+        environment,
+        workspace_base,
+        previous_error=None,
+    ):
+        self.fix_calls += 1
+        raise FixAgentError(
+            "Codex batch groups must merge findings that name the same file"
+        )
+
+
 class MovingBatchAgent(BatchAgent):
     def __init__(self, repository_path: Path) -> None:
         super().__init__()
@@ -295,6 +312,44 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_repeated_batch_contract_error_falls_back_to_finding_mode(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+processing_mode = "review_batch"
+github_token = "test-only-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target)
+            agent = ContractFailureBatchAgent()
+            worker = LocalBatchPushWorker(config, CommandRunner(), agent)
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                queued = state.jobs()[0]
+                events = state.events(queued.id)
+
+        self.assertEqual(agent.fix_calls, 2)
+        self.assertEqual(queued.status, "queued")
+        self.assertEqual(queued.fallback_finding, 1)
+        self.assertIn("batch_fallback_started", [event.event_type for event in events])
+
     def test_repairs_permissions_changed_by_fix_before_harness(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

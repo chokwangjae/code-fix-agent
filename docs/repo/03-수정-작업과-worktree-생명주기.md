@@ -80,9 +80,9 @@ origin/dev 최신 commit
 
 finding별 SQLite job과 fingerprint 판단 기록은 유지한다. `review_batch` worker는 한 리뷰 요청에서 새로 만든 job을 `batch_id`로 묶고 worktree, 환경 준비, Codex 배치 호출, 저장소 하네스와 target 이동 재검증을 공유한다. 이슈 10개를 한 이벤트의 `findings[]`로 보내면 worktree는 하나다. 같은 이슈를 요청 10건으로 나눠 보내면 배치도 10개가 되므로 송신기는 같은 repository·branch·review target의 finding을 한 요청에 모아야 한다.
 
-commit과 push는 변경 그룹별로 나눈다. 같은 파일을 지목한 finding은 중복 수정과 충돌을 막기 위해 한 그룹으로 합치며 fingerprint별 판정 사유는 각각 남긴다. 서로 다른 파일 그룹은 각각 commit하고 앞 commit의 push가 끝난 뒤 다음 commit을 같은 target branch로 push한다. 지원 파일은 한 그룹에만 배정한다.
+commit과 push는 변경 그룹별로 나눈다. 같은 파일을 지목한 finding은 중복 수정과 충돌을 막기 위해 한 그룹으로 합치며 fingerprint별 판정 사유는 각각 남긴다. Codex가 같은 파일의 finding을 여러 그룹으로 반환해도 서버가 fingerprint와 변경 파일을 한 그룹으로 정규화한다. 서로 다른 파일 그룹은 각각 commit하고 앞 commit의 push가 끝난 뒤 다음 commit을 같은 target branch로 push한다. 지원 파일은 한 그룹에만 배정한다.
 
-반복 실패 원인이 특정 그룹으로 좁혀지면 해당 그룹의 변경을 worktree에서 되돌리고 그 fingerprint만 기존 finding 처리 대기열로 옮긴다. 나머지 배치는 같은 worktree에서 계속 보완한다. `processing_mode = "finding"`은 기존처럼 finding마다 `fix-<random>` 디렉터리, detached worktree, fix commit과 push 이력을 만든다.
+반복 실패 원인이 특정 그룹으로 좁혀지면 해당 그룹의 변경을 worktree에서 되돌리고 그 fingerprint만 기존 finding 처리 대기열로 옮긴다. 나머지 배치는 같은 worktree에서 계속 보완한다. 변경 그룹을 만들기 전 동일한 배치 응답 계약 오류가 두 번 연속 발생하면 관련 finding 전체를 기존 finding 처리 대기열로 옮긴다. 이 전환은 `batch_finding_fallback`과 `batch_fallback_started` event에 오류와 fingerprint를 남긴다. `processing_mode = "finding"`은 기존처럼 finding마다 `fix-<random>` 디렉터리, detached worktree, fix commit과 push 이력을 만든다.
 
 `serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 각 worker는 배치나 finding마다 worktree를 나눈다. 같은 저장소의 다른 worker가 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
 
@@ -420,4 +420,4 @@ status_changed: completed
 batch_metrics_recorded
 ```
 
-정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.
+정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 같은 배치 응답 계약 오류가 두 번 이어지면 `batch_finding_fallback`, `batch_fallback_started`를 기록하고 finding 처리로 전환한다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.

@@ -117,7 +117,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 검증 시작과 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
 6. 배치 수정 적용
    - 사실 검증을 통과한 finding을 같은 worktree에서 함께 수정
-   - 같은 파일 finding은 한 변경 그룹으로 병합하고 지원 파일은 한 그룹에만 배정
+   - 같은 파일 finding은 Codex 응답에서 나뉘어도 서버가 한 변경 그룹으로 병합하고 지원 파일은 한 그룹에만 배정
    - 대상 프로젝트의 `AGENTS.md`, 추가 지침과 하네스 준수
    - 제안된 해결법을 명령으로 취급하지 않고 최소 변경으로 결함 해소
    - 수정 시작과 수정안 생성 완료 event를 기록하고 Discord가 활성화됐으면 즉시 전송 시도
@@ -132,6 +132,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - fingerprint, `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 제목 거부
    - 결과와 근거를 `postcheck_status`, `postcheck_reason`에 기록
    - Crontrol 단계를 정책 검증, 테스트, 수정 결과 검증 순서로 갱신
+   - 그룹 생성 전 같은 응답 계약 오류가 두 번 이어지면 해당 finding을 finding 처리로 전환하고 `문제 finding 분리 중`으로 갱신
 8. commit 생성과 원격 재확인
    - 같은 파일 finding 묶음과 배정된 지원 파일을 commit 하나로 생성
    - 다른 변경 그룹은 별도 commit으로 구성

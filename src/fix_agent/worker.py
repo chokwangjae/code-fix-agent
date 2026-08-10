@@ -453,6 +453,8 @@ class FixWorker:
         previous_error = initial_error or next(
             (job.last_error for job in jobs if job.last_error), None
         )
+        repeated_contract_error: str | None = None
+        repeated_contract_failures = 0
         while active:
             self._batch_event(
                 active,
@@ -569,6 +571,15 @@ class FixWorker:
                 raise
             except FixAgentError as exc:
                 previous_error = str(exc)
+                if not groups and _is_batch_contract_error(previous_error):
+                    if repeated_contract_error == previous_error:
+                        repeated_contract_failures += 1
+                    else:
+                        repeated_contract_error = previous_error
+                        repeated_contract_failures = 1
+                else:
+                    repeated_contract_error = None
+                    repeated_contract_failures = 0
                 for job in active:
                     with StateStore(self.config.state_dir) as state:
                         state.record_fix_iteration_failure(job.id, previous_error, tests)
@@ -585,6 +596,24 @@ class FixWorker:
                     },
                     notify=True,
                 )
+                if repeated_contract_failures >= 2:
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_finding_fallback(
+                            tuple(job.id for job in active), previous_error
+                        )
+                    self._batch_event(
+                        active,
+                        "batch_fallback_started",
+                        "repeated batch response error moved findings to finding mode",
+                        {
+                            "batch_id": batch.id,
+                            "fingerprints": [job.fingerprint for job in active],
+                            "reason": previous_error[:4_000],
+                            "contract_failures": repeated_contract_failures,
+                        },
+                        notify=True,
+                    )
+                    return (), [], None
                 if iteration >= 2 and groups:
                     problem = self.agent.diagnose_batch_failure(
                         repository,
@@ -1690,3 +1719,14 @@ def _test_failure_error(
             f"- {command} (exit {test.get('returncode')}): {output[-2_000:]}"
         )
     return "\n".join(lines)[:10_000]
+
+
+def _is_batch_contract_error(error: str) -> bool:
+    return error.startswith(
+        (
+            "Codex batch call",
+            "Codex batch response",
+            "Codex batch groups",
+            "same-file findings",
+        )
+    )

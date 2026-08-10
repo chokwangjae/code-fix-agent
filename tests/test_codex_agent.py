@@ -76,7 +76,7 @@ class CodexAgentTest(unittest.TestCase):
         self.assertEqual(metrics.total_tokens, 100)
         self.assertIn("--json", runner.calls[0][0])
 
-    def test_batch_groups_reject_split_findings_for_the_same_file(self) -> None:
+    def test_batch_groups_merge_split_findings_for_the_same_file(self) -> None:
         first = job(fingerprint="sha256:" + "c" * 64)
         second = job(id=2, fingerprint="sha256:" + "d" * 64)
         runner = FakeRunner(
@@ -97,14 +97,17 @@ class CodexAgentTest(unittest.TestCase):
         )
         with TemporaryDirectory() as directory:
             repository = self._repository(Path(directory))
-            with self.assertRaisesRegex(FixAgentError, "overlapping groups"):
-                CodexAgent(runner, "/usr/bin/codex").apply_batch_fixes(
-                    repository,
-                    (first, second),
-                    Path(directory),
-                    {"PATH": "/usr/bin"},
-                    "b" * 40,
-                )
+            groups = CodexAgent(runner, "/usr/bin/codex").apply_batch_fixes(
+                repository,
+                (first, second),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+                "b" * 40,
+            )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].fingerprints, (first.fingerprint, second.fingerprint))
+        self.assertEqual(groups[0].files, (first.file,))
 
     def test_records_specific_independent_validation_reason(self) -> None:
         runner = FakeRunner('{"valid":true,"reason":"Caller drops exit 1."}')

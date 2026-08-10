@@ -113,7 +113,7 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `serve`는 `[server].max_concurrent_jobs`만큼 worker를 띄운다. 현재 운영값은 `3`이며 각 worker는 서로 다른 리뷰 배치 또는 finding 작업과 worktree를 사용한다. 이 값을 바꾸면 프로세스를 재시작해야 한다.
 
-`processing_mode = "review_batch"`는 이벤트의 finding을 한 worktree에서 함께 사실 검증하고 수정한다. 같은 파일을 지목한 finding은 한 변경 그룹으로 합치며, 다른 그룹은 각각 commit한 뒤 target branch에 순서대로 push한다. 오탐만 fingerprint별 `rejected`로 끝낸다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 배치 전체를 보완하고, 반복 실패 원인이 특정 그룹으로 좁혀지면 그 그룹만 기존 finding 처리 방식으로 돌린다. 이전 방식이 필요하면 저장소별 `processing_mode = "finding"`으로 되돌린다. 배치 모드는 finding별 순차 push가 필요한 `publish_mode = "direct"`에서만 사용할 수 있다.
+`processing_mode = "review_batch"`는 이벤트의 finding을 한 worktree에서 함께 사실 검증하고 수정한다. 같은 파일을 지목한 finding이 Codex 응답에서 나뉘어도 서버가 한 변경 그룹으로 합치며, 다른 그룹은 각각 commit한 뒤 target branch에 순서대로 push한다. 오탐만 fingerprint별 `rejected`로 끝낸다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 배치 전체를 보완한다. 반복 실패 원인이 특정 그룹으로 좁혀지면 그 그룹만 기존 finding 처리 방식으로 돌리고, 그룹을 만들기 전 같은 응답 계약 오류가 두 번 이어지면 해당 finding을 모두 finding 처리 대기열로 옮긴다. 이전 방식이 필요하면 저장소별 `processing_mode = "finding"`으로 되돌린다. 배치 모드는 finding별 순차 push가 필요한 `publish_mode = "direct"`에서만 사용할 수 있다.
 
 프로세스를 재시작하면 `validating`, `fixing`, `testing`, `ready`, `pushed` 상태였던 job을 자동 복구한다. 재시작은 시도 횟수를 늘리지 않는다. 기록된 worktree가 남아 있으면 미커밋 diff와 생성된 commit을 포함한 현재 상태에서 수정을 이어가고, worktree가 없으면 최신 target에서 다시 시작한다. 복구 과정은 `restart_recovery_scheduled`, `worktree_resumed` event로 남는다.
 

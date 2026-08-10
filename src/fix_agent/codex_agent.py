@@ -648,8 +648,7 @@ def _batch_groups(
     expected = {job.fingerprint for job in jobs}
     finding_files = {job.fingerprint: job.file for job in jobs}
     seen_fingerprints: set[str] = set()
-    seen_files: set[str] = set()
-    groups: list[BatchChangeGroup] = []
+    groups_by_finding_file: dict[str, BatchChangeGroup] = {}
     for value in values:
         if not isinstance(value, dict):
             raise FixAgentError("Codex batch response contains an invalid group")
@@ -670,7 +669,6 @@ def _batch_groups(
             or len(file_set) != len(files)
             or not fingerprint_set.issubset(expected)
             or seen_fingerprints.intersection(fingerprint_set)
-            or seen_files.intersection(file_set)
         ):
             raise FixAgentError("Codex batch response contains overlapping groups")
         named_files = {finding_files[item] for item in fingerprint_set}
@@ -683,23 +681,36 @@ def _batch_groups(
             title = _validated_commit_title(title)
         elif title is not None:
             title = _validated_commit_title(title)
-        groups.append(
-            BatchChangeGroup(
-                tuple(fingerprints), tuple(files), title if isinstance(title, str) else None
-            )
+        named_file = next(iter(named_files))
+        current = groups_by_finding_file.get(named_file)
+        groups_by_finding_file[named_file] = BatchChangeGroup(
+            tuple(
+                dict.fromkeys(
+                    (*current.fingerprints, *fingerprints)
+                    if current is not None
+                    else fingerprints
+                )
+            ),
+            tuple(
+                dict.fromkeys(
+                    (*current.files, *files) if current is not None else files
+                )
+            ),
+            (
+                current.commit_title
+                if current is not None and current.commit_title is not None
+                else title if isinstance(title, str) else None
+            ),
         )
         seen_fingerprints.update(fingerprint_set)
-        seen_files.update(file_set)
     if seen_fingerprints != expected:
         raise FixAgentError("Codex batch response must group every fingerprint once")
-    by_file: dict[str, set[str]] = {}
-    for job in jobs:
-        by_file.setdefault(job.file, set()).add(job.fingerprint)
-    if any(
-        not any(expected_group == set(group.fingerprints) for group in groups)
-        for expected_group in by_file.values()
-    ):
-        raise FixAgentError("same-file findings must use one change group")
+    groups = list(groups_by_finding_file.values())
+    seen_files: set[str] = set()
+    for group in groups:
+        if seen_files.intersection(group.files):
+            raise FixAgentError("Codex batch response contains overlapping groups")
+        seen_files.update(group.files)
     return tuple(groups)
 
 
