@@ -12,7 +12,13 @@ import sys
 import threading
 import time
 
-from .codex_agent import BatchChangeGroup, BatchFixDecision, CodexAgent, Decision
+from .codex_agent import (
+    BatchChangeGroup,
+    BatchFixDecision,
+    CodexAgent,
+    Decision,
+    InvocationMetrics,
+)
 from .command import CommandResult, CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .crontrol import CrontrolReporter
@@ -294,6 +300,7 @@ class FixWorker:
         self, batch: BatchClaim, repository: RepositoryConfig
     ) -> None:
         batch_started = time.monotonic()
+        incremental_metrics = hasattr(self.agent, "set_metrics_sink")
         if repository.publish_mode != "direct":
             raise FixAgentError("review_batch processing requires publish_mode = direct")
         primary = batch.jobs[0]
@@ -313,6 +320,10 @@ class FixWorker:
             resumable_worktree = state.resumable_batch_worktree(batch.id)
             checkpoints = state.publish_checkpoints(f"batch:{batch.id}")
         pending_fallbacks: tuple[_PendingFallback, ...] = ()
+        if incremental_metrics:
+            self.agent.set_metrics_sink(
+                lambda metrics: self._record_batch_invocation(batch.id, metrics)
+            )
         try:
             with FixWorkspace(
                 self.runner,
@@ -468,17 +479,25 @@ class FixWorker:
                 state.mark_batch_completed(batch.id)
         finally:
             metrics = self.agent.take_batch_metrics()
+            if incremental_metrics:
+                self.agent.set_metrics_sink(None)
             duration_ms = round((time.monotonic() - batch_started) * 1000)
             with StateStore(self.config.state_dir) as state:
                 state.record_batch_metrics(
                     batch.id,
-                    codex_calls=metrics.calls,
-                    input_tokens=metrics.input_tokens,
-                    cached_input_tokens=metrics.cached_input_tokens,
-                    cache_write_input_tokens=metrics.cache_write_input_tokens,
-                    output_tokens=metrics.output_tokens,
-                    reasoning_output_tokens=metrics.reasoning_output_tokens,
-                    total_tokens=metrics.total_tokens,
+                    codex_calls=0 if incremental_metrics else metrics.calls,
+                    input_tokens=0 if incremental_metrics else metrics.input_tokens,
+                    cached_input_tokens=(
+                        0 if incremental_metrics else metrics.cached_input_tokens
+                    ),
+                    cache_write_input_tokens=(
+                        0 if incremental_metrics else metrics.cache_write_input_tokens
+                    ),
+                    output_tokens=0 if incremental_metrics else metrics.output_tokens,
+                    reasoning_output_tokens=(
+                        0 if incremental_metrics else metrics.reasoning_output_tokens
+                    ),
+                    total_tokens=0 if incremental_metrics else metrics.total_tokens,
                     duration_ms=duration_ms,
                 )
             self._event(
@@ -492,6 +511,25 @@ class FixWorker:
                     "duration_ms": duration_ms,
                 },
             )
+
+    def _record_batch_invocation(
+        self, batch_id: str, metrics: InvocationMetrics
+    ) -> None:
+        try:
+            with StateStore(self.config.state_dir) as state:
+                state.record_batch_metrics(
+                    batch_id,
+                    codex_calls=metrics.calls,
+                    input_tokens=metrics.input_tokens,
+                    cached_input_tokens=metrics.cached_input_tokens,
+                    cache_write_input_tokens=metrics.cache_write_input_tokens,
+                    output_tokens=metrics.output_tokens,
+                    reasoning_output_tokens=metrics.reasoning_output_tokens,
+                    total_tokens=metrics.total_tokens,
+                    duration_ms=0,
+                )
+        except Exception as exc:
+            print(f"batch {batch_id} incremental metrics write failed: {exc}")
 
     def _validate_batch_findings(
         self,

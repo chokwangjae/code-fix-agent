@@ -354,7 +354,7 @@ git -C /configured/local_path worktree list --porcelain
 | `details_json` | commit, 경로, 충돌 파일과 판단 사유 |
 | `created_at` | UTC ISO 8601 시각 |
 
-`batch_runs`는 `batch_id`, 상태, 시도 횟수, Codex 호출 수, 입력·cache·출력·reasoning·전체 token, 누적 실행 시간과 마지막 오류를 보관한다. token 값은 Codex JSONL의 `turn.completed.usage`를 합산하며 지원되지 않는 항목은 `0`으로 남긴다.
+`batch_runs`는 `batch_id`, 상태, 시도 횟수, Codex 호출 수, 입력·cache·출력·reasoning·전체 token, 누적 실행 시간과 마지막 오류를 보관한다. worker는 Codex 호출이 끝날 때마다 호출 수와 token을 DB에 더하므로 다음 호출 중 프로세스가 종료되어도 앞선 사용량은 남는다. batch 시도가 끝나면 해당 시도의 wall time을 `duration_ms`에 더한다. token 값은 Codex JSONL의 `turn.completed.usage`를 사용한다. `total_tokens`가 없으면 `input_tokens + output_tokens`로 계산하며 `cached_input_tokens`는 입력 token에 다시 더하지 않는다. 지원되지 않는 항목은 `0`으로 남긴다.
 
 작업 하나의 이력을 조회한다.
 

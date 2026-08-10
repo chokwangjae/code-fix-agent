@@ -21,6 +21,54 @@ class FakeRunner:
 
 
 class CodexAgentTest(unittest.TestCase):
+    def test_batch_metrics_sink_records_each_call_and_derives_total_tokens(self) -> None:
+        fingerprint = "sha256:" + "c" * 64
+        message = json.dumps(
+            {
+                "findings": [
+                    {
+                        "fingerprint": fingerprint,
+                        "valid": True,
+                        "reason": "caller reaches the failing branch",
+                    }
+                ]
+            }
+        )
+        runner = FakeRunner(
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": message},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 90, "output_tokens": 10},
+                        }
+                    ),
+                )
+            )
+        )
+        recorded = []
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            agent = CodexAgent(runner, "/usr/bin/codex")
+            agent.set_metrics_sink(recorded.append)
+            agent.validate_findings(
+                repository,
+                (job(fingerprint=fingerprint),),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+                "b" * 40,
+            )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0].calls, 1)
+        self.assertEqual(recorded[0].total_tokens, 100)
+
     def test_batch_jsonl_records_usage_and_preserves_finding_reasons(self) -> None:
         fingerprint = "sha256:" + "c" * 64
         message = json.dumps(

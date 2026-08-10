@@ -134,6 +134,8 @@ worker는 실행 가능한 batch와 finding을 `created_at`, job ID 순서로 �
 
 하네스와 결과 검증을 통과한 commit은 push 전에 `publish_checkpoints`에 기록한다. push 인증, push URL 또는 일시적인 원격 오류가 발생하면 해당 worktree를 제거하지 않는다. 다음 시도는 `worktree_resumed`, `publish_retry_resumed`를 남기고 checkpoint commit부터 push를 재시도한다. 원격 target이 움직였으면 기존 절차대로 merge한 뒤 하네스와 결과 검증을 다시 실행한다. fetch URL과 `git remote get-url --push` 결과가 모두 설정한 `github` 저장소와 일치해야 push를 시작한다.
 
+배치 Codex 호출 수와 token은 각 호출이 끝날 때 `batch_runs`에 누적한다. 프로세스가 다음 호출 중 종료되어도 앞선 호출의 사용량은 남는다. Codex 응답에 `total_tokens`가 없으면 `input_tokens + output_tokens`로 계산한다. `duration_ms`는 재시도별 batch wall time을 종료 시점에 더한다.
+
 수정 결과를 검증하는 Codex는 같은 diff와 대상 저장소의 `AGENTS.md`를 근거로 commit 제목도 만든다. 변경 종류에 맞는 type과 실제 하위 시스템 scope를 고르고 변경된 동작을 제목에 적는다. fingerprint, `autofix`, `review finding`, `review issue`, `리뷰 이슈`처럼 수정 내용을 대신하는 표기는 거부한다. `commit_message_template`의 첫 줄에는 생성 제목을 넣고 나머지 본문은 설정값을 유지한다. 새 설정은 첫 줄에 `{title}`을 사용하며, `{title}`이 없는 기존 설정도 commit할 때 첫 줄을 생성 제목으로 교체한다.
 
 `setup_commands`는 새 worktree를 만든 뒤 Codex 검증보다 먼저 실행한다. 준비 명령이 실패하면 `setup_max_attempts`만큼 같은 worktree에서 재시도한다. `setup_watch_paths`에 지정한 lockfile이나 빌드 설정이 수정 또는 원격 merge로 바뀌면 하네스 전에 준비 명령을 다시 실행한다. 명령은 shell 문자열이 아닌 argument 배열로 지정한다. 설치 도구가 lockfile이나 프로젝트 파일을 다시 쓰면 실행 전 내용을 복원해 수정 diff와 분리한다.

@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import time
+from typing import Callable
 
 from .command import CommandRunner
 from .config import RepositoryConfig
@@ -69,6 +70,12 @@ class CodexAgent:
         self.runner = runner
         self.executable = executable
         self._batch_metrics: list[InvocationMetrics] = []
+        self._metrics_sink: Callable[[InvocationMetrics], None] | None = None
+
+    def set_metrics_sink(
+        self, sink: Callable[[InvocationMetrics], None] | None
+    ) -> None:
+        self._metrics_sink = sink
 
     def validate_findings(
         self,
@@ -562,18 +569,19 @@ Return only JSON after editing:
         if result.returncode == 0:
             message, usage = _codex_json_result(result.stdout)
         duration_ms = round((time.monotonic() - started) * 1000)
-        self._batch_metrics.append(
-            InvocationMetrics(
-                calls=1,
-                input_tokens=usage.get("input_tokens", 0),
-                cached_input_tokens=usage.get("cached_input_tokens", 0),
-                cache_write_input_tokens=usage.get("cache_write_input_tokens", 0),
-                output_tokens=usage.get("output_tokens", 0),
-                reasoning_output_tokens=usage.get("reasoning_output_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
-                duration_ms=duration_ms,
-            )
+        metrics = InvocationMetrics(
+            calls=1,
+            input_tokens=usage.get("input_tokens", 0),
+            cached_input_tokens=usage.get("cached_input_tokens", 0),
+            cache_write_input_tokens=usage.get("cache_write_input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            reasoning_output_tokens=usage.get("reasoning_output_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
         )
+        self._batch_metrics.append(metrics)
+        if self._metrics_sink is not None:
+            self._metrics_sink(metrics)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "Codex failed").strip()
             raise FixAgentError(f"Codex failed: {detail}")
@@ -783,6 +791,10 @@ def _codex_json_result(output: str) -> tuple[str | None, dict[str, int]]:
                     and not isinstance(value, bool)
                     and value >= 0
                 }
+    if "total_tokens" not in usage:
+        usage["total_tokens"] = usage.get("input_tokens", 0) + usage.get(
+            "output_tokens", 0
+        )
     return message, usage
 
 
