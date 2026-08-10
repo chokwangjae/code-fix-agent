@@ -129,6 +129,9 @@ class RepositoryConfig:
     git_author_name: str
     git_author_email: str
     command_timeout_seconds: int
+    codex_timeout_seconds: int
+    harness_timeout_seconds: int
+    job_timeout_seconds: int
     setup_max_attempts: int
     setup_retry_delay_seconds: int
     max_attempts: int
@@ -354,6 +357,10 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         raise FixAgentError(f"{context}.git_author_name must be a non-empty string")
     if not isinstance(git_author_email, str) or not git_author_email.strip():
         raise FixAgentError(f"{context}.git_author_email must be a non-empty string")
+    command_timeout_seconds = _positive_integer(
+        execution.get("command_timeout_seconds", 1800),
+        f"{context}.execution.command_timeout_seconds",
+    )
     return RepositoryConfig(
         id=_required_string(raw, "id", context),
         github=github,
@@ -373,9 +380,22 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         commit_message_template=commit_message_template.strip(),
         git_author_name=git_author_name.strip(),
         git_author_email=git_author_email.strip(),
-        command_timeout_seconds=_positive_integer(
-            execution.get("command_timeout_seconds", 1800),
-            f"{context}.execution.command_timeout_seconds",
+        command_timeout_seconds=command_timeout_seconds,
+        codex_timeout_seconds=_positive_integer(
+            execution.get(
+                "codex_timeout_seconds", min(command_timeout_seconds, 3600)
+            ),
+            f"{context}.execution.codex_timeout_seconds",
+        ),
+        harness_timeout_seconds=_positive_integer(
+            execution.get(
+                "harness_timeout_seconds", min(command_timeout_seconds, 1800)
+            ),
+            f"{context}.execution.harness_timeout_seconds",
+        ),
+        job_timeout_seconds=_positive_integer(
+            execution.get("job_timeout_seconds", 7200),
+            f"{context}.execution.job_timeout_seconds",
         ),
         setup_max_attempts=_positive_integer(
             execution.get("setup_max_attempts", 3),

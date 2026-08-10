@@ -33,6 +33,7 @@ def job(**overrides: object) -> Job:
         "pr_url": None,
         "batch_id": None,
         "fallback_finding": 0,
+        "execution_started_at": None,
         "created_at": now,
         "updated_at": now,
     }

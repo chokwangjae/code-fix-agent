@@ -286,6 +286,26 @@ class ConfigTest(unittest.TestCase):
             config = load_config(path)
         self.assertEqual(config.server.max_concurrent_jobs, 3)
 
+    def test_loads_separate_execution_timeouts(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                "[repositories.execution]\n",
+                "[repositories.execution]\n"
+                "command_timeout_seconds = 5000\n"
+                "codex_timeout_seconds = 2400\n"
+                "harness_timeout_seconds = 900\n"
+                "job_timeout_seconds = 7200\n",
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+
+        repository = config.repositories[0]
+        self.assertEqual(repository.command_timeout_seconds, 5000)
+        self.assertEqual(repository.codex_timeout_seconds, 2400)
+        self.assertEqual(repository.harness_timeout_seconds, 900)
+        self.assertEqual(repository.job_timeout_seconds, 7200)
+
     def test_rejects_excessive_concurrent_worker_limit(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "fix.toml"

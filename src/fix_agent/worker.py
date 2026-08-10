@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -14,7 +16,12 @@ from .command import CommandResult, CommandRunner
 from .config import AppConfig, RepositoryConfig
 from .crontrol import CrontrolReporter
 from .credentials import resolve_github_credential
-from .errors import EnvironmentSetupError, FixAgentError
+from .errors import (
+    EnvironmentSetupError,
+    FixAgentError,
+    JobTerminalError,
+    JobTimeBudgetExceeded,
+)
 from .notify import DiscordNotifier
 from .state import BatchClaim, Job, StateStore
 from .workspace import (
@@ -94,6 +101,7 @@ class FixWorker:
         self.notifier.initialize_cursors()
         self._stop = threading.Event()
         self._current_job_id: int | None = None
+        self._deadline: datetime | None = None
 
     def run_once(self) -> bool:
         with StateStore(self.config.state_dir) as state:
@@ -111,13 +119,14 @@ class FixWorker:
             self.crontrol.sync(None)
             self._dispatch_notifications()
             return False
+        repository = self.config.repository_by_id(job.repository_id)
         self._current_job_id = job.id
         self.crontrol.sync(job.id, "작업 준비")
         try:
+            self._start_budget(repository, job.execution_started_at)
             self._process(job)
         except Exception as exc:
-            repository = self.config.repository_by_id(job.repository_id)
-            retryable = (
+            retryable = not isinstance(exc, JobTerminalError) and (
                 repository.max_attempts == 0
                 or job.attempts < repository.max_attempts
             )
@@ -146,6 +155,7 @@ class FixWorker:
             self.crontrol.sync(job.id)
             self._dispatch_notifications()
             self._current_job_id = None
+            self._deadline = None
             self.crontrol.sync(None)
         return True
 
@@ -155,9 +165,10 @@ class FixWorker:
         self._current_job_id = primary.id
         self.crontrol.sync(primary.id, "리뷰 배치 준비")
         try:
+            self._start_budget(repository, batch.started_at)
             self._process_batch(batch, repository)
         except Exception as exc:
-            retryable = (
+            retryable = not isinstance(exc, JobTerminalError) and (
                 repository.max_attempts == 0
                 or batch.attempt < repository.max_attempts
             )
@@ -187,6 +198,7 @@ class FixWorker:
             self.crontrol.sync(primary.id)
             self._dispatch_notifications()
             self._current_job_id = None
+            self._deadline = None
             self.crontrol.sync(None)
         return True
 
@@ -202,6 +214,37 @@ class FixWorker:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _start_budget(
+        self, repository: RepositoryConfig, started_at: str | None
+    ) -> None:
+        started = (
+            datetime.fromisoformat(started_at)
+            if started_at
+            else datetime.now(timezone.utc)
+        )
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        self._deadline = started + timedelta(seconds=repository.job_timeout_seconds)
+        self._remaining_timeout(repository.job_timeout_seconds)
+
+    def _remaining_timeout(self, maximum: int) -> int:
+        if self._deadline is None:
+            return maximum
+        remaining = (self._deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            raise JobTimeBudgetExceeded("job execution time budget was exhausted")
+        return min(maximum, max(1, math.ceil(remaining)))
+
+    def _codex_repository(
+        self, repository: RepositoryConfig
+    ) -> RepositoryConfig:
+        return replace(
+            repository,
+            command_timeout_seconds=self._remaining_timeout(
+                repository.codex_timeout_seconds
+            ),
+        )
 
     def _dispatch_notifications(self) -> None:
         try:
@@ -435,7 +478,7 @@ class FixWorker:
                 notify=True,
             )
             decisions = self.agent.validate_findings(
-                repository,
+                self._codex_repository(repository),
                 undecided,
                 workspace.path,
                 environment,
@@ -493,6 +536,7 @@ class FixWorker:
         repeated_contract_error: str | None = None
         repeated_contract_failures = 0
         while active:
+            self._remaining_timeout(repository.job_timeout_seconds)
             self._batch_event(
                 active,
                 "batch_fix_started",
@@ -507,12 +551,13 @@ class FixWorker:
             )
             groups: tuple[BatchChangeGroup, ...] = ()
             tests: list[dict[str, object]] = []
+            before_edit = workspace.working_tree_fingerprint()
             try:
                 self._ensure_workspace_permissions(
                     active[0], workspace, f"batch_fix_{iteration}_before_edit"
                 )
                 groups = self.agent.apply_batch_fixes(
-                    repository,
+                    self._codex_repository(repository),
                     active,
                     workspace.path,
                     environment,
@@ -569,7 +614,7 @@ class FixWorker:
                     notify=True,
                 )
                 postcheck = self.agent.validate_batch_fix(
-                    repository,
+                    self._codex_repository(repository),
                     active,
                     groups,
                     workspace.path,
@@ -609,7 +654,7 @@ class FixWorker:
                     )
                 workspace.validate_diff(tuple(job.file for job in active))
                 return postcheck.groups, tests, postcheck, tuple(pending_fallbacks)
-            except EnvironmentSetupError:
+            except (EnvironmentSetupError, JobTerminalError):
                 raise
             except FixAgentError as exc:
                 previous_error = str(exc)
@@ -659,9 +704,30 @@ class FixWorker:
                         notify=True,
                     )
                     return (), [], None, tuple(pending_fallbacks)
+                if (
+                    repeated_contract_failures == 0
+                    and workspace.working_tree_fingerprint() == before_edit
+                ):
+                    with StateStore(self.config.state_dir) as state:
+                        state.mark_finding_fallback_pending(
+                            tuple(job.id for job in active), previous_error
+                        )
+                    pending_fallbacks.append(_PendingFallback(active, previous_error))
+                    self._batch_event(
+                        active,
+                        "batch_fallback_started",
+                        "batch edit made no change; findings moved to finding mode",
+                        {
+                            "batch_id": batch.id,
+                            "fingerprints": [job.fingerprint for job in active],
+                            "reason": previous_error[:4_000],
+                        },
+                        notify=True,
+                    )
+                    return (), [], None, tuple(pending_fallbacks)
                 if iteration >= 2 and groups:
                     problem = self.agent.diagnose_batch_failure(
-                        repository,
+                        self._codex_repository(repository),
                         active,
                         groups,
                         workspace.path,
@@ -846,7 +912,7 @@ class FixWorker:
                 {"batch_id": batch.id, "files": list(merge.conflict_files)},
             )
             resolution = self.agent.resolve_batch_merge_conflicts(
-                repository,
+                self._codex_repository(repository),
                 jobs,
                 workspace.path,
                 environment,
@@ -914,7 +980,7 @@ class FixWorker:
                     _test_failure_error(failed, after_target_merge=True)
                 )
             validation = self.agent.validate_batch_fix(
-                repository,
+                self._codex_repository(repository),
                 jobs,
                 all_groups,
                 workspace.path,
@@ -1084,7 +1150,7 @@ class FixWorker:
                     notify=True,
                 )
                 decision = self.agent.validate_finding(
-                    repository,
+                    self._codex_repository(repository),
                     job,
                     workspace.path,
                     environment,
@@ -1151,7 +1217,7 @@ class FixWorker:
                             },
                         )
                         resolution = self.agent.resolve_merge_conflicts(
-                            repository,
+                            self._codex_repository(repository),
                             job,
                             workspace.path,
                             environment,
@@ -1217,7 +1283,7 @@ class FixWorker:
                         )
                     workspace.require_clean_checkout()
                     postcheck = self.agent.validate_fix(
-                        repository,
+                        self._codex_repository(repository),
                         job,
                         workspace.path,
                         environment,
@@ -1377,7 +1443,9 @@ class FixWorker:
                 command,
                 cwd=workspace,
                 environment=environment,
-                timeout_seconds=repository.command_timeout_seconds,
+                timeout_seconds=self._remaining_timeout(
+                    repository.harness_timeout_seconds
+                ),
                 check=False,
             )
             results.append(
@@ -1426,7 +1494,9 @@ class FixWorker:
                     command,
                     cwd=workspace.path,
                     environment=environment,
-                    timeout_seconds=repository.command_timeout_seconds,
+                    timeout_seconds=self._remaining_timeout(
+                        repository.command_timeout_seconds
+                    ),
                     check=False,
                 )
                 if result.returncode != 0:
@@ -1525,7 +1595,10 @@ class FixWorker:
         iteration = 1
         retry_error = job.last_error
         retry_tests = job.tests_json
+        repeated_error = retry_error
+        repeated_failures = 1 if retry_error else 0
         while True:
+            self._remaining_timeout(repository.job_timeout_seconds)
             iteration_job = replace(
                 job,
                 attempts=job.attempts + iteration - 1,
@@ -1550,12 +1623,13 @@ class FixWorker:
                 notify=True,
             )
             tests: list[dict[str, object]] = []
+            before_edit = workspace.working_tree_fingerprint()
             try:
                 self._ensure_workspace_permissions(
                     job, workspace, f"fix_iteration_{iteration}_before_edit"
                 )
                 self.agent.apply_fix(
-                    repository,
+                    self._codex_repository(repository),
                     iteration_job,
                     workspace.path,
                     environment,
@@ -1616,7 +1690,7 @@ class FixWorker:
                     {"workspace_base": workspace.base_commit, "iteration": iteration},
                 )
                 postcheck = self.agent.validate_fix(
-                    repository,
+                    self._codex_repository(repository),
                     iteration_job,
                     workspace.path,
                     environment,
@@ -1646,16 +1720,15 @@ class FixWorker:
                     )
                 workspace.validate_diff()
                 return summary, tests, postcheck
-            except EnvironmentSetupError:
+            except (EnvironmentSetupError, JobTerminalError):
                 raise
             except FixAgentError as exc:
-                total_attempt = job.attempts + iteration - 1
-                if (
-                    repository.max_attempts != 0
-                    and total_attempt >= repository.max_attempts
-                ):
-                    raise
                 retry_error = str(exc)
+                if retry_error == repeated_error:
+                    repeated_failures += 1
+                else:
+                    repeated_error = retry_error
+                    repeated_failures = 1
                 if tests:
                     retry_tests = json.dumps(tests, ensure_ascii=False)
                 with StateStore(self.config.state_dir) as state:
@@ -1673,6 +1746,20 @@ class FixWorker:
                     },
                     notify=True,
                 )
+                if workspace.working_tree_fingerprint() == before_edit:
+                    raise JobTerminalError(
+                        "Codex edit made no worktree change after a failed validation"
+                    ) from exc
+                if repeated_failures >= 2:
+                    raise JobTerminalError(
+                        "the same fix validation error occurred twice"
+                    ) from exc
+                total_attempt = job.attempts + iteration - 1
+                if (
+                    repository.max_attempts != 0
+                    and total_attempt >= repository.max_attempts
+                ):
+                    raise
                 iteration += 1
 
     def _push(

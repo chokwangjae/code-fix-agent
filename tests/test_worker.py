@@ -126,6 +126,11 @@ class ReadOnlyFixAgent(FakeAgent):
         (workspace / job.file).chmod(0o400)
 
 
+class NoProgressAgent(FakeAgent):
+    def apply_fix(self, repository, job, workspace, environment, workspace_base=None):
+        return None
+
+
 class BatchAgent(FakeAgent):
     def __init__(self) -> None:
         super().__init__()
@@ -313,6 +318,63 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_stops_retry_when_codex_makes_no_worktree_change(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(root, repository_path)
+            self._queue(config, baseline, target)
+            worker = LocalWorker(config, CommandRunner(), NoProgressAgent())
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                failed = state.jobs()[0]
+
+        self.assertEqual(failed.status, "failed")
+        self.assertIsNone(failed.next_attempt_at)
+        self.assertIn("made no worktree change", failed.last_error)
+
+    def test_stops_job_after_cumulative_execution_budget(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+github_token = "test-token"
+test_commands = []
+[repositories.execution]
+job_timeout_seconds = 1
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target)
+            with StateStore(config.state_dir) as state:
+                state.connection.execute(
+                    "UPDATE jobs SET execution_started_at = ?",
+                    ("2000-01-01T00:00:00+00:00",),
+                )
+                state.connection.commit()
+            worker = LocalWorker(config, CommandRunner(), FakeAgent())
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                failed = state.jobs()[0]
+
+        self.assertEqual(failed.status, "failed")
+        self.assertIsNone(failed.next_attempt_at)
+        self.assertIn("time budget", failed.last_error)
+
     def test_worker_loop_survives_unexpected_claim_error(self) -> None:
         class RecoveringWorker(FixWorker):
             def __init__(self, config):

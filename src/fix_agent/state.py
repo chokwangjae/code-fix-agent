@@ -40,6 +40,7 @@ class Job:
     pr_url: str | None
     batch_id: str | None
     fallback_finding: int
+    execution_started_at: str | None
     created_at: str
     updated_at: str
 
@@ -58,6 +59,7 @@ class BatchClaim:
     id: str
     jobs: tuple[Job, ...]
     attempt: int
+    started_at: str
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,7 @@ class StateStore:
                 pr_url TEXT,
                 batch_id TEXT,
                 fallback_finding INTEGER NOT NULL DEFAULT 0,
+                execution_started_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (repository, branch, fingerprint)
@@ -260,6 +263,7 @@ class StateStore:
             ("next_attempt_at", "TEXT"),
             ("batch_id", "TEXT"),
             ("fallback_finding", "INTEGER NOT NULL DEFAULT 0"),
+            ("execution_started_at", "TEXT"),
         ):
             if name not in columns:
                 self.connection.execute(
@@ -582,10 +586,12 @@ class StateStore:
                 """
                 UPDATE jobs
                 SET status = 'validating', attempts = attempts + 1,
-                    next_attempt_at = NULL, updated_at = ?
+                    next_attempt_at = NULL,
+                    execution_started_at = COALESCE(execution_started_at, ?),
+                    updated_at = ?
                 WHERE id = ? AND status IN ('queued', 'failed')
                 """,
-                (_now(), row["id"]),
+                (now, now, row["id"]),
             )
             if cursor.rowcount != 1:
                 self.connection.rollback()
@@ -653,11 +659,13 @@ class StateStore:
                 f"""
                 UPDATE jobs
                 SET status = 'validating', attempts = attempts + 1,
-                    next_attempt_at = NULL, updated_at = ?
+                    next_attempt_at = NULL,
+                    execution_started_at = COALESCE(execution_started_at, ?),
+                    updated_at = ?
                 WHERE id IN ({placeholders})
                   AND status IN ('queued', 'failed')
                 """,
-                (now, *claimed_ids),
+                (now, now, *claimed_ids),
             )
             if cursor.rowcount != len(claimed_ids):
                 self.connection.rollback()
@@ -692,8 +700,14 @@ class StateStore:
         except Exception:
             self.connection.rollback()
             raise
+        run = self.batch_run(str(batch_id))
+        if run is None or run.started_at is None:  # pragma: no cover - schema invariant
+            raise sqlite3.DatabaseError(f"batch run does not exist: {batch_id}")
         return BatchClaim(
-            str(batch_id), tuple(Job(**dict(row)) for row in claimed), attempt
+            str(batch_id),
+            tuple(Job(**dict(row)) for row in claimed),
+            attempt,
+            run.started_at,
         )
 
     def batch_run(self, batch_id: str) -> BatchRun | None:
