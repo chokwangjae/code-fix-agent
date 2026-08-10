@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from fix_agent.codex_agent import (
     BatchChangeGroup,
@@ -312,6 +313,58 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_os_conditional_command_only_passes_on_a_different_host(self) -> None:
+        class RecordingRunner(CommandRunner):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, command, **kwargs):
+                self.calls += 1
+                return CommandResult("", "test failed", 1)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{root / 'repo'}"
+publish_mode = "direct"
+github_token = "test-only-token"
+test_commands = []
+conditional_test_commands = [
+  {{ command = ["xcodebuild", "test"], host_os = ["macos"] }}
+]
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            runner = RecordingRunner()
+            worker = FixWorker(config, runner, FakeAgent())
+            with patch("fix_agent.worker.sys.platform", "linux"):
+                skipped = worker._run_tests(
+                    config.repositories[0], root, {"PATH": "/usr/bin"}
+                )
+            with patch("fix_agent.worker.sys.platform", "darwin"):
+                executed = worker._run_tests(
+                    config.repositories[0], root, {"PATH": "/usr/bin"}
+                )
+
+        self.assertEqual(skipped[0]["returncode"], 0)
+        self.assertEqual(skipped[0]["outcome"], "conditional_pass")
+        self.assertEqual(skipped[0]["host_os"], "linux")
+        self.assertEqual(skipped[0]["required_host_os"], ["macos"])
+        self.assertEqual(runner.calls, 1)
+        self.assertEqual(executed[0]["returncode"], 1)
+        self.assertEqual(executed[0]["outcome"], "failed")
+
     def test_repeated_batch_contract_error_falls_back_to_finding_mode(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

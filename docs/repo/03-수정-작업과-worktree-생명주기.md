@@ -39,6 +39,8 @@ max_remote_merge_attempts = 3
 
 `max_attempts = 0`은 수정 대상으로 확정된 job을 완료할 때까지 횟수 제한 없이 보완한다. 양수는 최초 시도를 포함한 최대 횟수다. 정책·하네스·결과 검증 실패는 같은 worktree에서 바로 보완한다. 프로세스를 재시작하면 진행 중 job을 재시도 횟수 차감 없이 다시 대기열에 넣는다. 기록된 worktree가 남아 있으면 기존 diff와 commit을 보존한 채 같은 경로에서 이어가고, 경로가 없으면 최신 target에서 새 worktree를 만든다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
 
+OS 전용 하네스는 `conditional_test_commands`의 `host_os`로 실행 가능 여부를 판정한다. 현재 OS가 목록 밖인 명령만 실행하지 않고 조건부 통과하며 사유를 기록한다. 현재 OS에서 실행된 명령이 실패하거나 timeout된 경우에는 같은 worktree에서 보완을 계속한다.
+
 `github_token_env` 대신 `github_token = "..."`을 쓰면 GitHub token을 TOML에 직접 설정할 수 있다. 두 키를 모두 생략하면 `gh auth token --hostname github.com`으로 PC 로그인 token을 읽는다. 인증 값은 Codex와 테스트 명령에 전달하지 않고 Git network·PR 명령에만 사용한다.
 
 운영 정책은 `allow_new_files`와 `allow_deletions`를 모두 `true`로 두고 `max_changed_files`, `max_changed_lines`를 `0`으로 둔다. 허용 경로 안에서는 파일 추가·수정·삭제와 변경량을 제한하지 않는다. `allowed_paths`, `denied_paths`와 finding 파일 변경 조건은 계속 적용한다.

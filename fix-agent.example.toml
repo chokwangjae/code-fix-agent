@@ -31,6 +31,10 @@ processing_mode = "review_batch"
 # github_token = "replace-with-a-repository-scoped-token"
 # github_token_env = "MATRIX_FIX_GITHUB_TOKEN"
 test_commands = []
+# 현재 호스트가 host_os에 없을 때만 실행 불가 사유를 기록하고 조건부 통과한다.
+conditional_test_commands = [
+  # { command = ["xcodebuild", "test"], host_os = ["macos"] },
+]
 additional_instructions = ""
 commit_message_template = """{title}
 

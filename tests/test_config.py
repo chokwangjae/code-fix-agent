@@ -23,6 +23,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.setup_retry_delay_seconds, 3)
         self.assertEqual(repository.setup_commands, (("python3", "-m", "pip", "install"),))
         self.assertIn("**/package-lock.json", repository.setup_watch_paths)
+        self.assertEqual(repository.test_command_host_os, ((),))
         self.assertEqual(repository.retry_delay_seconds, 15)
         self.assertEqual(repository.max_remote_merge_attempts, 4)
         self.assertTrue(repository.discord.enabled)
@@ -118,6 +119,37 @@ class ConfigTest(unittest.TestCase):
             )
             path.write_text(value, encoding="utf-8")
             with self.assertRaisesRegex(FixAgentError, r"setup_commands\[0\]"):
+                load_config(path)
+
+    def test_loads_os_conditional_test_command(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'test_commands = [["python3", "-m", "unittest"]]',
+                'test_commands = [["python3", "-m", "unittest"]]\n'
+                'conditional_test_commands = [\n'
+                '  { command = ["xcodebuild", "test"], host_os = ["macos"] }\n'
+                ']',
+            )
+            path.write_text(value, encoding="utf-8")
+            config = load_config(path)
+
+        repository = config.repositories[0]
+        self.assertEqual(repository.test_commands[-1], ("xcodebuild", "test"))
+        self.assertEqual(repository.test_command_host_os, ((), ("macos",)))
+
+    def test_rejects_unknown_conditional_test_host_os(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                'test_commands = [["python3", "-m", "unittest"]]',
+                'test_commands = []\n'
+                'conditional_test_commands = [\n'
+                '  { command = ["xcodebuild", "test"], host_os = ["ios"] }\n'
+                ']',
+            )
+            path.write_text(value, encoding="utf-8")
+            with self.assertRaisesRegex(FixAgentError, "unsupported values"):
                 load_config(path)
 
     def test_accepts_zero_change_limits_as_unlimited(self) -> None:

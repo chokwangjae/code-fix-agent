@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -45,6 +46,7 @@ _CRONTROL_EVENT_STAGES = {
     "retry_scheduled": "재시도 대기",
     "diff_validated": "변경 정책 검증 완료",
     "tests_started": "테스트 중",
+    "tests_conditional_pass": "OS 차이 조건부 통과",
     "result_validation_started": "수정 결과 검증 중",
     "result_validation_completed": "수정 결과 검증 완료",
     "fix_committed": "커밋 완료",
@@ -534,7 +536,12 @@ class FixWorker:
                         "iteration": iteration,
                     },
                 )
-                tests = self._run_tests(repository, workspace.path, environment)
+                tests = self._run_tests(
+                    repository,
+                    workspace.path,
+                    environment,
+                    tuple(job.id for job in active),
+                )
                 failed = [test for test in tests if test["returncode"] != 0]
                 for job in active:
                     with StateStore(self.config.state_dir) as state:
@@ -874,7 +881,12 @@ class FixWorker:
             self._prepare_environment(
                 repository, jobs[0], workspace, environment, setup_state
             )
-            tests = self._run_tests(repository, workspace.path, environment)
+            tests = self._run_tests(
+                repository,
+                workspace.path,
+                environment,
+                tuple(job.id for job in jobs),
+            )
             failed = [test for test in tests if test["returncode"] != 0]
             for job in jobs:
                 with StateStore(self.config.state_dir) as state:
@@ -1184,7 +1196,9 @@ class FixWorker:
                     )
                     with StateStore(self.config.state_dir) as state:
                         state.mark_testing(job.id)
-                    tests = self._run_tests(repository, workspace.path, environment)
+                    tests = self._run_tests(
+                        repository, workspace.path, environment, (job.id,)
+                    )
                     with StateStore(self.config.state_dir) as state:
                         state.record_tests(job.id, tests)
                     failed = [test for test in tests if test["returncode"] != 0]
@@ -1313,9 +1327,43 @@ class FixWorker:
         repository: RepositoryConfig,
         workspace: Path,
         environment: dict[str, str],
+        job_ids: tuple[int, ...] = (),
     ) -> list[dict[str, object]]:
         results = []
-        for command in repository.test_commands:
+        host_os = _host_operating_system()
+        for command, allowed_host_os in zip(
+            repository.test_commands, repository.test_command_host_os, strict=True
+        ):
+            if allowed_host_os and host_os not in allowed_host_os:
+                reason = (
+                    f"command requires host_os={','.join(allowed_host_os)}; "
+                    f"current host_os={host_os}"
+                )
+                results.append(
+                    {
+                        "command": list(command),
+                        "returncode": 0,
+                        "stdout": "",
+                        "stderr": "",
+                        "outcome": "conditional_pass",
+                        "reason": reason,
+                        "host_os": host_os,
+                        "required_host_os": list(allowed_host_os),
+                    }
+                )
+                for job_id in job_ids:
+                    self._event(
+                        job_id,
+                        "tests_conditional_pass",
+                        "현재 OS에서 실행할 수 없는 하네스 명령 조건부 통과",
+                        {
+                            "command": list(command),
+                            "host_os": host_os,
+                            "required_host_os": list(allowed_host_os),
+                            "reason": reason,
+                        },
+                    )
+                continue
             result = self.runner.run(
                 command,
                 cwd=workspace,
@@ -1329,6 +1377,7 @@ class FixWorker:
                     "returncode": result.returncode,
                     "stdout": result.stdout[-20_000:],
                     "stderr": result.stderr[-20_000:],
+                    "outcome": "passed" if result.returncode == 0 else "failed",
                 }
             )
         return results
@@ -1543,7 +1592,9 @@ class FixWorker:
                         "iteration": iteration,
                     },
                 )
-                tests = self._run_tests(repository, workspace.path, environment)
+                tests = self._run_tests(
+                    repository, workspace.path, environment, (job.id,)
+                )
                 with StateStore(self.config.state_dir) as state:
                     state.record_tests(job.id, tests)
                 failed = [test for test in tests if test["returncode"] != 0]
@@ -1753,6 +1804,16 @@ def _test_failure_error(
             f"- {command} (exit {test.get('returncode')}): {output[-2_000:]}"
         )
     return "\n".join(lines)[:10_000]
+
+
+def _host_operating_system() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform.startswith(("win32", "cygwin")):
+        return "windows"
+    return sys.platform
 
 
 def _is_batch_contract_error(error: str) -> bool:

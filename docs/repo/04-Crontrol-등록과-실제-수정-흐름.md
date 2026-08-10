@@ -127,6 +127,7 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 보정이 발생하면 event와 Crontrol에 `worktree 권한 복구 완료` 반영
    - 변경 경로, 파일 수, line 수, 추가·삭제 허용 정책 확인
    - 저장소별 `test_commands` 하네스를 배치당 한 번 실행
+   - 현재 OS에서 실행 불가능하도록 명시된 `conditional_test_commands`만 사유 기록 후 조건부 통과하고 Crontrol을 `OS 차이 조건부 통과`로 갱신
    - read-only Codex가 모든 원래 실패 경로 해소와 새 회귀 여부를 fingerprint별로 재검증
    - 같은 diff와 대상 `AGENTS.md`를 근거로 변경 type·scope·동작을 담은 commit 제목 생성
    - fingerprint, `autofix`, `review finding`, `review issue`, `리뷰 이슈` 같은 포괄 제목 거부

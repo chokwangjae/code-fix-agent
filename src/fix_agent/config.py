@@ -18,6 +18,7 @@ _GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SEVERITIES = ("Critical", "Major", "Minor")
 _PUBLISH_MODES = ("pull_request", "direct")
 _PROCESSING_MODES = ("finding", "review_batch")
+_HOST_OPERATING_SYSTEMS = ("linux", "macos", "windows")
 _DEFAULT_SETUP_WATCH_PATHS = (
     "package.json",
     "package-lock.json",
@@ -122,6 +123,7 @@ class RepositoryConfig:
     setup_commands: tuple[tuple[str, ...], ...]
     setup_watch_paths: tuple[str, ...]
     test_commands: tuple[tuple[str, ...], ...]
+    test_command_host_os: tuple[tuple[str, ...], ...]
     additional_instructions: str
     commit_message_template: str
     git_author_name: str
@@ -287,6 +289,14 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         allow_empty=True,
     )
     test_commands = _commands(raw.get("test_commands", []), context, "test_commands")
+    conditional_test_commands = _conditional_test_commands(
+        raw.get("conditional_test_commands", []), context
+    )
+    test_command_host_os = (
+        tuple(() for _ in test_commands)
+        + tuple(host_os for _, host_os in conditional_test_commands)
+    )
+    test_commands += tuple(command for command, _ in conditional_test_commands)
     additional_instructions = raw.get("additional_instructions", "")
     if not isinstance(additional_instructions, str):
         raise FixAgentError(f"{context}.additional_instructions must be a string")
@@ -358,6 +368,7 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         setup_commands=setup_commands,
         setup_watch_paths=setup_watch_paths,
         test_commands=test_commands,
+        test_command_host_os=test_command_host_os,
         additional_instructions=additional_instructions.strip(),
         commit_message_template=commit_message_template.strip(),
         git_author_name=git_author_name.strip(),
@@ -501,6 +512,31 @@ def _commands(
     for index, value in enumerate(raw):
         command = _string_array(value, f"{context}.{key}[{index}]")
         commands.append(command)
+    return tuple(commands)
+
+
+def _conditional_test_commands(
+    raw: Any, context: str
+) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    key = "conditional_test_commands"
+    if not isinstance(raw, list):
+        raise FixAgentError(f"{context}.{key} must be an array")
+    commands = []
+    for index, value in enumerate(raw):
+        item_context = f"{context}.{key}[{index}]"
+        if not isinstance(value, dict) or set(value) != {"command", "host_os"}:
+            raise FixAgentError(
+                f"{item_context} must contain only command and host_os"
+            )
+        command = _string_array(value["command"], f"{item_context}.command")
+        host_os = _string_array(value["host_os"], f"{item_context}.host_os")
+        unsupported = sorted(set(host_os).difference(_HOST_OPERATING_SYSTEMS))
+        if unsupported:
+            raise FixAgentError(
+                f"{item_context}.host_os contains unsupported values: "
+                + ", ".join(unsupported)
+            )
+        commands.append((command, host_os))
     return tuple(commands)
 
 
