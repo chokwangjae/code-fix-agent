@@ -110,6 +110,7 @@ class FixWorkspace:
         self._created = False
         self.base_commit: str | None = None
         self.cleanup_complete: bool | None = None
+        self._preserve_on_exit = False
         self._github_token_loaded = False
         self._github_token: str | None = None
         self._cache_environment: dict[str, str] | None = None
@@ -1120,6 +1121,20 @@ class FixWorkspace:
             environment=self.safe_environment,
         ).stdout.strip().lower()
 
+    def preserve(self, reason: str) -> None:
+        self._preserve_on_exit = True
+        self.cleanup_complete = False
+        self._record_event(
+            "worktree_preserved",
+            "worktree was preserved for publish retry",
+            {
+                "path": str(self.path),
+                "scope": self.worktree_scope,
+                "head_commit": self.head_commit(),
+                "reason": reason[:4_000],
+            },
+        )
+
     def close(self) -> None:
         remove_returncode: int | None = None
         permission_error: str | None = None
@@ -1189,7 +1204,8 @@ class FixWorkspace:
         return self
 
     def __exit__(self, *_: object) -> None:
-        self.close()
+        if not self._preserve_on_exit:
+            self.close()
 
 
 def reconcile_recorded_worktree(

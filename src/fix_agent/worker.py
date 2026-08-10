@@ -23,12 +23,11 @@ from .errors import (
     JobTimeBudgetExceeded,
 )
 from .notify import DiscordNotifier
-from .state import BatchClaim, Job, StateStore
+from .state import BatchClaim, Job, PublishCheckpoint, StateStore
 from .workspace import (
     DiffSummary,
     FixWorkspace,
     PermissionSummary,
-    reconcile_recorded_worktree,
 )
 
 
@@ -57,6 +56,8 @@ _CRONTROL_EVENT_STAGES = {
     "result_validation_started": "수정 결과 검증 중",
     "result_validation_completed": "수정 결과 검증 완료",
     "fix_committed": "커밋 완료",
+    "publish_checkpoint_recorded": "push 준비 완료",
+    "publish_retry_resumed": "push 재시도 중",
     "target_moved": "원격 target 병합 중",
     "merge_conflict_detected": "merge 충돌 해결 중",
     "merge_conflict_resolved": "merge 충돌 해결 완료",
@@ -123,7 +124,9 @@ class FixWorker:
         self._current_job_id = job.id
         self.crontrol.sync(job.id, "작업 준비")
         try:
-            self._start_budget(repository, job.execution_started_at)
+            self._start_budget(
+                repository, None if job.result_commit else job.execution_started_at
+            )
             self._process(job)
         except Exception as exc:
             retryable = not isinstance(exc, JobTerminalError) and (
@@ -165,7 +168,10 @@ class FixWorker:
         self._current_job_id = primary.id
         self.crontrol.sync(primary.id, "리뷰 배치 준비")
         try:
-            self._start_budget(repository, batch.started_at)
+            self._start_budget(
+                repository,
+                None if any(job.result_commit for job in batch.jobs) else batch.started_at,
+            )
             self._process_batch(batch, repository)
         except Exception as exc:
             retryable = not isinstance(exc, JobTerminalError) and (
@@ -276,6 +282,7 @@ class FixWorker:
         )
         with StateStore(self.config.state_dir) as state:
             resumable_worktree = state.resumable_batch_worktree(batch.id)
+            checkpoints = state.publish_checkpoints(f"batch:{batch.id}")
         pending_fallbacks: tuple[_PendingFallback, ...] = ()
         try:
             with FixWorkspace(
@@ -303,24 +310,47 @@ class FixWorker:
                                 repository.target_branch,
                                 job.result_commit or current_target,
                             )
+                        for checkpoint in checkpoints:
+                            if workspace.is_ancestor(
+                                checkpoint.commit, current_target
+                            ):
+                                state.mark_publish_checkpoint_pushed(
+                                    f"batch:{batch.id}", checkpoint.fingerprints
+                                )
                     published_ids = {job.id for job in already_published}
                     pending = tuple(
                         job for job in batch.jobs if job.id not in published_ids
                     )
-                    if pending and workspace.head_commit() != current_target:
+                    if (
+                        pending
+                        and not checkpoints
+                        and workspace.head_commit() != current_target
+                    ):
                         workspace.flatten_batch_to_target(current_target)
                 else:
                     pending = batch.jobs
 
-                valid_jobs = self._validate_batch_findings(
-                    batch,
-                    repository,
-                    pending,
-                    workspace,
-                    environment,
-                    setup_state,
-                )
-                if valid_jobs:
+                if checkpoints:
+                    valid_jobs = pending
+                    self._resume_batch_publish(
+                        batch,
+                        repository,
+                        pending,
+                        checkpoints,
+                        workspace,
+                        environment,
+                        setup_state,
+                    )
+                else:
+                    valid_jobs = self._validate_batch_findings(
+                        batch,
+                        repository,
+                        pending,
+                        workspace,
+                        environment,
+                        setup_state,
+                    )
+                if valid_jobs and not checkpoints:
                     (
                         groups,
                         tests,
@@ -770,6 +800,145 @@ class FixWorker:
                 iteration += 1
         return (), [], None, tuple(pending_fallbacks)
 
+    def _resume_batch_publish(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        checkpoints: tuple[PublishCheckpoint, ...],
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+    ) -> None:
+        jobs_by_fingerprint = {job.fingerprint: job for job in jobs}
+        remaining = tuple(
+            checkpoint
+            for checkpoint in checkpoints
+            if checkpoint.status != "pushed"
+            and any(
+                fingerprint in jobs_by_fingerprint
+                for fingerprint in checkpoint.fingerprints
+            )
+        )
+        if not remaining:
+            return
+        self._batch_event(
+            jobs,
+            "publish_retry_resumed",
+            "batch publish retry resumed from validated commit checkpoints",
+            {
+                "batch_id": batch.id,
+                "commits": [checkpoint.commit for checkpoint in remaining],
+            },
+        )
+        for index, checkpoint in enumerate(remaining):
+            current = workspace.fetch_target_head()
+            if workspace.is_ancestor(checkpoint.commit, current):
+                self._complete_batch_checkpoint(
+                    batch, repository, checkpoint, jobs_by_fingerprint
+                )
+                continue
+            expected_parent = workspace.commit_parent(checkpoint.commit)
+            if current != expected_parent:
+                pending_checkpoints = remaining[index:]
+                groups = tuple(
+                    BatchChangeGroup(
+                        value.fingerprints, value.files, value.title
+                    )
+                    for value in pending_checkpoints
+                )
+                pending_jobs = tuple(
+                    job
+                    for job in jobs
+                    if any(
+                        job.fingerprint in value.fingerprints
+                        for value in pending_checkpoints
+                    )
+                )
+                self._reconcile_batch_target(
+                    batch,
+                    repository,
+                    pending_jobs,
+                    groups,
+                    groups,
+                    workspace,
+                    environment,
+                    setup_state,
+                    0,
+                )
+                self._publish_batch_groups(
+                    batch,
+                    repository,
+                    pending_jobs,
+                    groups,
+                    workspace,
+                    environment,
+                    setup_state,
+                )
+                return
+            try:
+                checkpoint_jobs = tuple(
+                    jobs_by_fingerprint[fingerprint]
+                    for fingerprint in checkpoint.fingerprints
+                    if fingerprint in jobs_by_fingerprint
+                )
+                self._batch_event(
+                    checkpoint_jobs,
+                    "push_started",
+                    "pushing a checkpointed finding change group",
+                    {
+                        "batch_id": batch.id,
+                        "remote": repository.remote,
+                        "branch": repository.target_branch,
+                        "commit": checkpoint.commit,
+                    },
+                )
+                self._push_commit(
+                    repository,
+                    workspace.path,
+                    environment,
+                    repository.target_branch,
+                    checkpoint.commit,
+                )
+            except FixAgentError as exc:
+                workspace.preserve(str(exc))
+                raise
+            self._complete_batch_checkpoint(
+                batch, repository, checkpoint, jobs_by_fingerprint
+            )
+
+    def _complete_batch_checkpoint(
+        self,
+        batch: BatchClaim,
+        repository: RepositoryConfig,
+        checkpoint: PublishCheckpoint,
+        jobs_by_fingerprint: dict[str, Job],
+    ) -> None:
+        for fingerprint in checkpoint.fingerprints:
+            job = jobs_by_fingerprint.get(fingerprint)
+            if job is None:
+                continue
+            self._event(
+                job.id,
+                "push_completed",
+                "finding change group was pushed from its checkpoint",
+                {
+                    "batch_id": batch.id,
+                    "remote": repository.remote,
+                    "branch": repository.target_branch,
+                    "commit": checkpoint.commit,
+                    "fingerprints": list(checkpoint.fingerprints),
+                },
+            )
+            with StateStore(self.config.state_dir) as state:
+                state.mark_pushed(
+                    job.id, repository.target_branch, checkpoint.commit
+                )
+        with StateStore(self.config.state_dir) as state:
+            state.mark_publish_checkpoint_pushed(
+                f"batch:{batch.id}", checkpoint.fingerprints
+            )
+
     def _publish_batch_groups(
         self,
         batch: BatchClaim,
@@ -795,6 +964,22 @@ class FixWorker:
                 for group in current_round
             )
             commits = workspace.commit_finding_groups(commit_inputs)
+            for sequence, finding_commit in enumerate(commits, start=1):
+                checkpoint_jobs = tuple(
+                    jobs_by_fingerprint[value].id
+                    for value in finding_commit.fingerprints
+                )
+                with StateStore(self.config.state_dir) as state:
+                    state.record_publish_checkpoint(
+                        checkpoint_jobs,
+                        batch_id=batch.id,
+                        sequence=sequence,
+                        branch=repository.target_branch,
+                        commit=finding_commit.commit,
+                        fingerprints=finding_commit.fingerprints,
+                        files=finding_commit.files,
+                        title=finding_commit.title,
+                    )
             restart = False
             for index, finding_commit in enumerate(commits):
                 expected_parent = workspace.commit_parent(finding_commit.commit)
@@ -837,9 +1022,14 @@ class FixWorker:
                         finding_commit.commit,
                     )
                 except FixAgentError as push_error:
-                    current = workspace.fetch_target_head()
+                    try:
+                        current = workspace.fetch_target_head()
+                    except FixAgentError:
+                        workspace.preserve(str(push_error))
+                        raise push_error
                     if current != finding_commit.commit:
                         if current == expected_parent:
+                            workspace.preserve(str(push_error))
                             raise push_error
                         remaining = current_round[index:]
                         remote_merges = self._reconcile_batch_target(
@@ -872,6 +1062,9 @@ class FixWorker:
                     with StateStore(self.config.state_dir) as state:
                         state.mark_pushed(
                             job.id, repository.target_branch, finding_commit.commit
+                        )
+                        state.mark_publish_checkpoint_pushed(
+                            f"batch:{batch.id}", finding_commit.fingerprints
                         )
             if not restart:
                 remaining = ()
@@ -1057,52 +1250,6 @@ class FixWorker:
                 "publish_mode": repository.publish_mode,
             },
         )
-        if job.fix_branch and job.result_commit:
-            if repository.publish_mode == "direct":
-                with StateStore(self.config.state_dir) as state:
-                    cleanup_events = [
-                        event
-                        for event in state.events(job.id)
-                        if event.event_type
-                        in {"worktree_removed", "worktree_cleanup_incomplete"}
-                    ]
-                    worktree_events = [
-                        event
-                        for event in state.events(job.id)
-                        if event.event_type == "worktree_created"
-                    ]
-                if (
-                    not cleanup_events
-                    or cleanup_events[-1].event_type != "worktree_removed"
-                ):
-                    if not worktree_events:
-                        raise FixAgentError(
-                            "pushed job has no recorded worktree path for cleanup"
-                        )
-                    details = json.loads(worktree_events[-1].details_json)
-                    path = details.get("path") if isinstance(details, dict) else None
-                    if not isinstance(path, str) or not path:
-                        raise FixAgentError(
-                            "pushed job has an invalid recorded worktree path"
-                        )
-                    if not reconcile_recorded_worktree(
-                        self.runner,
-                        repository,
-                        self.config.state_dir,
-                        job.id,
-                        path,
-                    ):
-                        raise FixAgentError(
-                            "direct push succeeded but worktree cleanup is incomplete"
-                        )
-                with StateStore(self.config.state_dir) as state:
-                    state.mark_completed(job.id, None)
-                return
-            pr_url = self._publish_pull_request(repository, job, job.fix_branch)
-            with StateStore(self.config.state_dir) as state:
-                state.mark_completed(job.id, pr_url)
-            return
-
         with StateStore(self.config.state_dir) as state:
             resumable_worktree = state.resumable_worktree(
                 job.id, scope="finding"
@@ -1116,78 +1263,34 @@ class FixWorker:
         ) as workspace:
             environment = workspace.safe_environment
             setup_state = _SetupState()
-            mismatch = workspace.finding_mismatch_reason()
-            if mismatch:
-                with StateStore(self.config.state_dir) as state:
-                    state.record_precheck(job.id, False, mismatch)
-                print(f"job {job.id} rejected: {mismatch}")
-                return
-            self._event(
-                job.id,
-                "finding_git_validated",
-                "finding commit, file, and reviewed line matched the review diff",
-                {"reviewed_target": job.target_commit},
-            )
-            self._prepare_environment(
-                repository, job, workspace, environment, setup_state
-            )
-            if job.precheck_status == "valid" and job.precheck_reason:
-                decision = Decision(True, job.precheck_reason)
-                with StateStore(self.config.state_dir) as state:
-                    state.record_precheck(job.id, True, decision.reason)
+            with StateStore(self.config.state_dir) as state:
+                checkpoints = state.publish_checkpoints(f"job:{job.id}")
+            checkpoint = checkpoints[0] if checkpoints else None
+            if checkpoint is not None:
+                branch = checkpoint.branch
+                commit = checkpoint.commit
+                summary = workspace.validate_diff()
+                tests = json.loads(job.tests_json)
+                decision = Decision(True, job.precheck_reason or "checkpointed")
+                postcheck = Decision(True, job.postcheck_reason or "checkpointed")
                 self._event(
                     job.id,
-                    "finding_validation_reused",
-                    "previous valid finding decision was retained for the retry",
-                    {"reason": decision.reason, "attempt": job.attempts},
+                    "publish_retry_resumed",
+                    "publish retry resumed from the validated commit checkpoint",
+                    {"branch": branch, "commit": commit},
                 )
             else:
-                self._event(
-                    job.id,
-                    "finding_validation_started",
-                    "Codex started independent finding validation",
-                    {"workspace_base": workspace.base_commit},
-                    notify=True,
+                prepared = self._prepare_finding_commit(
+                    repository, job, workspace, environment, setup_state
                 )
-                decision = self.agent.validate_finding(
-                    self._codex_repository(repository),
-                    job,
-                    workspace.path,
-                    environment,
-                    workspace.base_commit,
-                )
-                with StateStore(self.config.state_dir) as state:
-                    state.record_precheck(job.id, decision.valid, decision.reason)
-                self._event(
-                    job.id,
-                    "finding_validation_completed",
-                    "Codex completed independent finding validation",
-                    {"valid": decision.valid, "reason": decision.reason},
-                    notify=True,
-                )
-                if not decision.valid:
-                    print(f"job {job.id} rejected: {decision.reason}")
+                if prepared is None:
                     return
-
-            summary, tests, postcheck = self._fix_until_valid(
-                repository, job, workspace, environment, setup_state
-            )
-            if postcheck.commit_title is None:
-                raise FixAgentError("fix validation returned no commit title")
-            branch, commit = workspace.commit(postcheck.commit_title)
-            self._event(
-                job.id,
-                "fix_committed",
-                "validated fix was committed in the worktree",
-                {
-                    "branch": branch,
-                    "commit": commit,
-                    "title": postcheck.commit_title,
-                },
-            )
+                branch, commit, summary, tests, decision, postcheck = prepared
             remote_merges = 0
             while True:
                 current = workspace.fetch_target_head()
+                if workspace.is_ancestor(commit, current):
+                    break
                 if current != workspace.base_commit:
                     if remote_merges >= repository.max_remote_merge_attempts:
                         raise FixAgentError(
@@ -1299,6 +1402,17 @@ class FixWorker:
                             + postcheck.reason
                         )
                     commit = workspace.head_commit()
+                    with StateStore(self.config.state_dir) as state:
+                        state.record_publish_checkpoint(
+                            (job.id,),
+                            batch_id=None,
+                            sequence=1,
+                            branch=branch,
+                            commit=commit,
+                            fingerprints=(job.fingerprint,),
+                            files=summary.files,
+                            title=checkpoint.title if checkpoint else "merged fix",
+                        )
                     self._event(
                         job.id,
                         "merged_fix_revalidated",
@@ -1319,7 +1433,11 @@ class FixWorker:
                     )
                     self._push(repository, workspace.path, environment, branch)
                 except FixAgentError as push_error:
-                    current = workspace.fetch_target_head()
+                    try:
+                        current = workspace.fetch_target_head()
+                    except FixAgentError:
+                        workspace.preserve(str(push_error))
+                        raise push_error
                     if (
                         repository.publish_mode == "direct"
                         and current == workspace.head_commit()
@@ -1338,6 +1456,7 @@ class FixWorker:
                             },
                         )
                         continue
+                    workspace.preserve(str(push_error))
                     raise push_error
                 commit = workspace.head_commit()
                 break
@@ -1349,6 +1468,9 @@ class FixWorker:
             )
             with StateStore(self.config.state_dir) as state:
                 state.mark_pushed(job.id, branch, commit)
+                state.mark_publish_checkpoint_pushed(
+                    f"job:{job.id}", (job.fingerprint,)
+                )
             job = Job(
                 **{
                     **job.__dict__,
@@ -1379,6 +1501,98 @@ class FixWorker:
         with StateStore(self.config.state_dir) as state:
             state.mark_completed(job.id, pr_url)
         print(f"job {job.id} completed: {pr_url}")
+
+    def _prepare_finding_commit(
+        self,
+        repository: RepositoryConfig,
+        job: Job,
+        workspace: FixWorkspace,
+        environment: dict[str, str],
+        setup_state: _SetupState,
+    ) -> tuple[
+        str,
+        str,
+        DiffSummary,
+        list[dict[str, object]],
+        Decision,
+        Decision,
+    ] | None:
+        mismatch = workspace.finding_mismatch_reason()
+        if mismatch:
+            with StateStore(self.config.state_dir) as state:
+                state.record_precheck(job.id, False, mismatch)
+            print(f"job {job.id} rejected: {mismatch}")
+            return None
+        self._event(
+            job.id,
+            "finding_git_validated",
+            "finding commit, file, and reviewed line matched the review diff",
+            {"reviewed_target": job.target_commit},
+        )
+        self._prepare_environment(
+            repository, job, workspace, environment, setup_state
+        )
+        if job.precheck_status == "valid" and job.precheck_reason:
+            decision = Decision(True, job.precheck_reason)
+            with StateStore(self.config.state_dir) as state:
+                state.record_precheck(job.id, True, decision.reason)
+            self._event(
+                job.id,
+                "finding_validation_reused",
+                "previous valid finding decision was retained for the retry",
+                {"reason": decision.reason, "attempt": job.attempts},
+            )
+        else:
+            self._event(
+                job.id,
+                "finding_validation_started",
+                "Codex started independent finding validation",
+                {"workspace_base": workspace.base_commit},
+                notify=True,
+            )
+            decision = self.agent.validate_finding(
+                self._codex_repository(repository),
+                job,
+                workspace.path,
+                environment,
+                workspace.base_commit,
+            )
+            with StateStore(self.config.state_dir) as state:
+                state.record_precheck(job.id, decision.valid, decision.reason)
+            self._event(
+                job.id,
+                "finding_validation_completed",
+                "Codex completed independent finding validation",
+                {"valid": decision.valid, "reason": decision.reason},
+                notify=True,
+            )
+            if not decision.valid:
+                print(f"job {job.id} rejected: {decision.reason}")
+                return None
+        summary, tests, postcheck = self._fix_until_valid(
+            repository, job, workspace, environment, setup_state
+        )
+        if postcheck.commit_title is None:
+            raise FixAgentError("fix validation returned no commit title")
+        branch, commit = workspace.commit(postcheck.commit_title)
+        self._event(
+            job.id,
+            "fix_committed",
+            "validated fix was committed in the worktree",
+            {"branch": branch, "commit": commit, "title": postcheck.commit_title},
+        )
+        with StateStore(self.config.state_dir) as state:
+            state.record_publish_checkpoint(
+                (job.id,),
+                batch_id=None,
+                sequence=1,
+                branch=branch,
+                commit=commit,
+                fingerprints=(job.fingerprint,),
+                files=summary.files,
+                title=postcheck.commit_title,
+            )
+        return branch, commit, summary, tests, decision, postcheck
 
     def _event(
         self,
@@ -1785,14 +1999,23 @@ class FixWorker:
             f"https://github.com/{repository.github}",
             f"https://github.com/{repository.github}.git",
         }
-        remote_url = self.runner.run(
+        fetch_url = self.runner.run(
             ["git", "remote", "get-url", repository.remote],
             cwd=workspace,
             environment=environment,
         ).stdout.strip()
-        if remote_url not in expected_urls:
+        push_url = self.runner.run(
+            ["git", "remote", "get-url", "--push", repository.remote],
+            cwd=workspace,
+            environment=environment,
+        ).stdout.strip()
+        if fetch_url not in expected_urls:
             raise FixAgentError(
-                f"Git remote does not match configured GitHub repository: {remote_url}"
+                f"Git fetch URL does not match configured GitHub repository: {fetch_url}"
+            )
+        if push_url not in expected_urls:
+            raise FixAgentError(
+                f"Git push URL does not match configured GitHub repository: {push_url}"
             )
         credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         push_environment.update(

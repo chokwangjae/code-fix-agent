@@ -421,6 +421,7 @@ result_validation_started
 result_validation_completed
 status_changed: ready
 [target_moved → target_merged 또는 merge_conflict_* → 재검증]
+finding 그룹별 publish_checkpoint_recorded
 finding 그룹별 push_started
 finding 그룹별 push_completed
 status_changed: pushed
@@ -430,6 +431,14 @@ batch_metrics_recorded
 ```
 
 정책·하네스·결과 검증 오류는 `fix_iteration_failed`에 기록한다. 다음 Codex 수정은 같은 worktree의 기존 diff와 직전 오류, 실패한 하네스 명령·출력을 받아 보완을 이어간다. 반복 실패 finding은 배치 정리 중 `fallback_pending`, 정리 후 `queued`로 전환한다. 프로세스 재시작으로 중단된 job은 `restart_recovery_scheduled` 뒤 다시 claim하며, pending finding은 `fallback_recovery_scheduled` 뒤 개별 worktree에서 시작한다. 기존 worktree를 찾으면 `worktree_resumed`를 기록하고 중단 직전 diff에서 보완을 계속한다. 프로세스 밖으로 빠져나온 실행 오류는 `last_error`, `status_changed: failed`, `retry_scheduled`로 기록한다. 독립 사실 검증에서 오탐으로 판정한 job만 `rejected`로 남긴다.
+
+## Push checkpoint와 worktree 보존
+
+worker는 finding별 commit을 만든 직후 `publish_checkpoints`와 job의 `fix_branch`, `result_commit`에 검증 완료 지점을 기록한다. 그 다음 push를 시작한다. push 인증 실패, 잘못된 push URL, 원격 연결 오류가 발생하면 `worktree_preserved` event를 남기고 worktree를 제거하지 않는다. job은 설정된 재시도 간격 뒤 다시 claim된다.
+
+재시도 worker는 `worktree_resumed` 뒤 `publish_retry_resumed`를 기록한다. 원격 target이 checkpoint commit의 parent와 같으면 기존 commit을 그대로 push하며 Codex 수정과 하네스를 반복하지 않는다. checkpoint commit이 원격에 이미 포함되어 있으면 push 성공으로 복구한다. target이 다른 commit으로 이동했으면 남은 finding 그룹을 최신 target에 merge하고 전체 하네스와 독립 결과 검증을 통과한 뒤 commit checkpoint를 갱신한다.
+
+`remote` 검사는 fetch URL과 push URL을 나눠 수행한다. `git remote get-url <remote>`와 `git remote get-url --push <remote>`가 모두 `https://github.com/<github>` 또는 `.git` URL과 일치해야 한다. 별도 `pushurl`이 다른 저장소나 remote helper를 가리키면 push 전에 중단한다.
 
 ## Worker pause와 오류 복구
 

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -295,6 +296,30 @@ class LocalBatchPushWorker(LocalWorker):
         )
 
 
+class FailingOnceDirectWorker(LocalDirectPushWorker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.push_attempts = 0
+
+    def _push(self, repository, workspace, environment, branch):
+        self.push_attempts += 1
+        if self.push_attempts == 1:
+            raise FixAgentError("temporary push failure")
+        super()._push(repository, workspace, environment, branch)
+
+
+class FailingOnceBatchWorker(LocalBatchPushWorker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.push_attempts = 0
+
+    def _push_commit(self, repository, workspace, environment, branch, commit):
+        self.push_attempts += 1
+        if self.push_attempts == 1:
+            raise FixAgentError("temporary batch push failure")
+        super()._push_commit(repository, workspace, environment, branch, commit)
+
+
 class RecordingCrontrol:
     def __init__(self) -> None:
         self.calls = []
@@ -318,6 +343,132 @@ class FlakySetupRunner(CommandRunner):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_rejects_push_url_that_differs_from_configured_repository(self) -> None:
+        class RemoteRunner(CommandRunner):
+            def run(self, command, **kwargs):
+                if list(command) == ["git", "remote", "get-url", "origin"]:
+                    return CommandResult("https://github.com/owner/repo.git\n", "", 0)
+                if list(command) == [
+                    "git",
+                    "remote",
+                    "get-url",
+                    "--push",
+                    "origin",
+                ]:
+                    return CommandResult("remote-disabled::owner/repo\n", "", 0)
+                raise AssertionError(f"unexpected command: {command}")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{root / 'repo'}"
+publish_mode = "direct"
+github_token = "test-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            worker = FixWorker(config, RemoteRunner(), FakeAgent())
+
+            with self.assertRaisesRegex(FixAgentError, "Git push URL"):
+                worker._push_commit(
+                    config.repositories[0], root, {}, "main", "a" * 40
+                )
+
+    def test_resumes_finding_from_publish_checkpoint_after_push_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config = WorkspaceTest._config(root, repository_path, publish_mode="direct")
+            config = replace(
+                config,
+                repositories=(
+                    replace(
+                        config.repositories[0],
+                        max_attempts=0,
+                        retry_delay_seconds=0,
+                    ),
+                ),
+            )
+            self._queue(config, baseline, target)
+            agent = FakeAgent()
+            worker = FailingOnceDirectWorker(config, CommandRunner(), agent)
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                failed = state.jobs()[0]
+                resumable = state.resumable_worktree(failed.id)
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                event_types = [event.event_type for event in state.events(completed.id)]
+
+        self.assertEqual(failed.status, "failed")
+        self.assertIsNotNone(failed.result_commit)
+        self.assertIsNotNone(resumable)
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(worker.push_attempts, 2)
+        self.assertIn("publish_checkpoint_recorded", event_types)
+        self.assertIn("publish_retry_resumed", event_types)
+
+    def test_resumes_batch_from_publish_checkpoint_after_push_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+processing_mode = "review_batch"
+github_token = "test-token"
+test_commands = []
+[repositories.execution]
+max_attempts = 0
+retry_delay_seconds = 0
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target)
+            agent = BatchAgent()
+            worker = FailingOnceBatchWorker(config, CommandRunner(), agent)
+
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                failed = state.jobs()[0]
+                resumable = state.resumable_batch_worktree(failed.batch_id)
+            self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                completed = state.jobs()[0]
+                event_types = [event.event_type for event in state.events(completed.id)]
+
+        self.assertEqual(failed.status, "failed")
+        self.assertIsNotNone(resumable)
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(agent.fix_calls, 1)
+        self.assertEqual(worker.push_attempts, 2)
+        self.assertIn("publish_retry_resumed", event_types)
+
     def test_stops_retry_when_codex_makes_no_worktree_change(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

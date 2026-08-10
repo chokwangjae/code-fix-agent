@@ -84,6 +84,22 @@ class BatchRun:
 
 
 @dataclass(frozen=True)
+class PublishCheckpoint:
+    scope_id: str
+    group_key: str
+    batch_id: str | None
+    sequence: int
+    branch: str
+    commit: str
+    fingerprints: tuple[str, ...]
+    files: tuple[str, ...]
+    title: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class JobEvent:
     id: int
     job_id: int
@@ -221,6 +237,25 @@ class StateStore:
         )
         self.connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS publish_checkpoints (
+                scope_id TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                batch_id TEXT,
+                sequence INTEGER NOT NULL,
+                branch TEXT NOT NULL,
+                commit_hash TEXT NOT NULL,
+                fingerprints_json TEXT NOT NULL,
+                files_json TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scope_id, group_key)
+            )
+            """
+        )
+        self.connection.execute(
+            """
             INSERT INTO worker_control (id, paused, reason, updated_at)
             VALUES (1, 0, NULL, ?)
             ON CONFLICT (id) DO NOTHING
@@ -292,6 +327,106 @@ class StateStore:
                 WHERE id = 1
                 """,
                 (int(paused), normalized_reason if paused else None, _now()),
+            )
+
+    def record_publish_checkpoint(
+        self,
+        job_ids: tuple[int, ...],
+        *,
+        batch_id: str | None,
+        sequence: int,
+        branch: str,
+        commit: str,
+        fingerprints: tuple[str, ...],
+        files: tuple[str, ...],
+        title: str,
+    ) -> None:
+        if not job_ids or not fingerprints:
+            raise ValueError("publish checkpoint requires jobs and fingerprints")
+        scope_id = f"batch:{batch_id}" if batch_id else f"job:{job_ids[0]}"
+        group_key = "|".join(sorted(fingerprints))
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO publish_checkpoints (
+                    scope_id, group_key, batch_id, sequence, branch, commit_hash,
+                    fingerprints_json, files_json, title, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                ON CONFLICT (scope_id, group_key) DO UPDATE SET
+                    sequence = excluded.sequence,
+                    branch = excluded.branch,
+                    commit_hash = excluded.commit_hash,
+                    fingerprints_json = excluded.fingerprints_json,
+                    files_json = excluded.files_json,
+                    title = excluded.title,
+                    status = 'ready',
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    scope_id,
+                    group_key,
+                    batch_id,
+                    sequence,
+                    branch,
+                    commit,
+                    json.dumps(fingerprints, ensure_ascii=False),
+                    json.dumps(files, ensure_ascii=False),
+                    title,
+                    now,
+                    now,
+                ),
+            )
+            for job_id in job_ids:
+                self.connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'ready', fix_branch = ?, result_commit = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (branch, commit, now, job_id),
+                )
+                self._insert_event(
+                    job_id,
+                    "publish_checkpoint_recorded",
+                    "validated commit was checkpointed before push",
+                    {
+                        "batch_id": batch_id,
+                        "sequence": sequence,
+                        "branch": branch,
+                        "commit": commit,
+                        "fingerprints": list(fingerprints),
+                        "files": list(files),
+                        "title": title,
+                    },
+                    status="ready",
+                )
+
+    def publish_checkpoints(self, scope_id: str) -> tuple[PublishCheckpoint, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM publish_checkpoints
+            WHERE scope_id = ?
+            ORDER BY sequence, created_at
+            """,
+            (scope_id,),
+        ).fetchall()
+        return tuple(_publish_checkpoint(row) for row in rows)
+
+    def mark_publish_checkpoint_pushed(
+        self, scope_id: str, fingerprints: tuple[str, ...]
+    ) -> None:
+        group_key = "|".join(sorted(fingerprints))
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE publish_checkpoints
+                SET status = 'pushed', updated_at = ?
+                WHERE scope_id = ? AND group_key = ?
+                """,
+                (_now(), scope_id, group_key),
             )
 
     def accept(self, repository: RepositoryConfig, event: ReviewEvent) -> IntakeResult:
@@ -1188,6 +1323,31 @@ class StateStore:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _publish_checkpoint(row: sqlite3.Row) -> PublishCheckpoint:
+    fingerprints = json.loads(row["fingerprints_json"])
+    files = json.loads(row["files_json"])
+    if not isinstance(fingerprints, list) or not all(
+        isinstance(value, str) for value in fingerprints
+    ):
+        raise sqlite3.DatabaseError("publish checkpoint fingerprints are invalid")
+    if not isinstance(files, list) or not all(isinstance(value, str) for value in files):
+        raise sqlite3.DatabaseError("publish checkpoint files are invalid")
+    return PublishCheckpoint(
+        scope_id=row["scope_id"],
+        group_key=row["group_key"],
+        batch_id=row["batch_id"],
+        sequence=row["sequence"],
+        branch=row["branch"],
+        commit=row["commit_hash"],
+        fingerprints=tuple(fingerprints),
+        files=tuple(files),
+        title=row["title"],
+        status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _event_path(details_json: str) -> str | None:

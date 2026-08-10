@@ -10,6 +10,40 @@ from test_contract import event
 
 
 class StateTest(unittest.TestCase):
+    def test_records_and_updates_publish_checkpoint(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                intake = state.accept(
+                    config.repositories[0], parse_review_event(event())
+                )
+                job_id = intake.job_ids[0]
+                fingerprint = event()["findings"][0]["fingerprint"]
+                state.record_publish_checkpoint(
+                    (job_id,),
+                    batch_id=None,
+                    sequence=1,
+                    branch="main",
+                    commit="a" * 40,
+                    fingerprints=(fingerprint,),
+                    files=("src/runner.py",),
+                    title="fix(worker): 실패 전달 복구",
+                )
+                checkpoint = state.publish_checkpoints(f"job:{job_id}")[0]
+                state.mark_publish_checkpoint_pushed(
+                    f"job:{job_id}", (fingerprint,)
+                )
+                pushed = state.publish_checkpoints(f"job:{job_id}")[0]
+                ready = state.job(job_id)
+
+        self.assertEqual(checkpoint.commit, "a" * 40)
+        self.assertEqual(checkpoint.files, ("src/runner.py",))
+        self.assertEqual(pushed.status, "pushed")
+        self.assertEqual(ready.result_commit, "a" * 40)
+
     def test_pause_blocks_claim_until_resume(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
