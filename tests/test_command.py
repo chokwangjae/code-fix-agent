@@ -10,6 +10,14 @@ from fix_agent.errors import FixAgentError
 
 
 class CommandRunnerTest(unittest.TestCase):
+    def test_writes_configured_input_to_stdin(self) -> None:
+        result = CommandRunner().run(
+            ["sh", "-c", "IFS= read -r value; printf 'received:%s' \"$value\""],
+            input_text="review prompt\n",
+        )
+
+        self.assertEqual(result.stdout, "received:review prompt")
+
     def test_timeout_terminates_descendant_process_group(self) -> None:
         with TemporaryDirectory() as directory:
             pid_file = Path(directory) / "child.pid"

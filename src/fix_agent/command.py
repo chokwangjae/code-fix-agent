@@ -33,6 +33,7 @@ class CommandRunner:
                 list(command),
                 cwd=cwd,
                 env=dict(environment) if environment is not None else None,
+                stdin=subprocess.PIPE if input_text is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
