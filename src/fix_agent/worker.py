@@ -110,10 +110,16 @@ class FixWorker:
                 batch = None
                 job = None
             else:
-                batch = state.claim_next_batch(self.config.repositories)
-                job = None if batch is not None else state.claim_next(
-                    self.config.repositories
-                )
+                claim_kind = state.next_claim_kind(self.config.repositories)
+                if claim_kind == "batch":
+                    batch = state.claim_next_batch(self.config.repositories)
+                    job = None
+                elif claim_kind == "finding":
+                    batch = None
+                    job = state.claim_next(self.config.repositories)
+                else:
+                    batch = None
+                    job = None
         if batch is not None:
             return self._run_batch(batch)
         if job is None:

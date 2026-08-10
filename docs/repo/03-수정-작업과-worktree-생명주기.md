@@ -95,6 +95,8 @@ commit과 push는 변경 그룹별로 나눈다. 서버는 Codex 호출 전에 f
 
 `serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 각 worker는 배치나 finding마다 worktree를 나눈다. 같은 저장소의 다른 worker가 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
 
+queue 선택은 batch 우선이 아니다. worker는 `next_attempt_at`이 지난 실행 가능 job을 `created_at`, job ID 순서로 비교하고 해당 항목이 일반 finding, fallback finding, review batch 중 어디에 속하는지 판정한다. 오래 기다린 fallback은 뒤에 접수된 batch보다 먼저 실행한다.
+
 ```toml
 [server]
 max_concurrent_jobs = 3

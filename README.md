@@ -126,6 +126,8 @@ curl http://127.0.0.1:7070/api/v1/jobs
 
 `processing_mode = "review_batch"`는 이벤트의 finding을 한 worktree에서 함께 사실 검증하고 수정한다. 서버가 finding 파일별 최소 변경 그룹을 먼저 정하고, 같은 파일이나 공용 지원 파일로 연결된 그룹을 합친다. Codex가 여러 finding 파일을 한 그룹에 담아도 계약 오류로 중단하지 않는다. 다른 그룹은 각각 commit한 뒤 target branch에 순서대로 push한다. 오탐만 fingerprint별 `rejected`로 끝낸다. 정책·하네스·결과 검증이 실패하면 같은 worktree에서 배치 전체를 보완한다. 반복 실패 원인이 특정 그룹으로 좁혀지면 그 그룹만 기존 finding 처리 방식으로 돌린다. fallback finding은 배치 worktree 정리가 끝날 때까지 `fallback_pending`에 두고, 정리 후 개별 처리 대기열에 공개한다. 이전 방식이 필요하면 저장소별 `processing_mode = "finding"`으로 되돌린다. 배치 모드는 finding별 순차 push가 필요한 `publish_mode = "direct"`에서만 사용할 수 있다.
 
+worker는 실행 가능한 batch와 finding을 `created_at`, job ID 순서로 비교한다. 오래 기다린 fallback finding이 있으면 나중에 접수된 새 batch보다 먼저 claim한다. 재시도 대기 시간이 남았거나 최대 시도 횟수를 쓴 항목은 비교에서 제외한다.
+
 프로세스를 재시작하면 `validating`, `fixing`, `testing`, `ready`, `pushed`, `fallback_pending` 상태였던 job을 자동 복구한다. 재시작은 시도 횟수를 늘리지 않는다. 기록된 worktree가 남아 있으면 미커밋 diff와 생성된 commit을 포함한 현재 상태에서 수정을 이어가고, worktree가 없으면 최신 target에서 다시 시작한다. 일반 작업 복구는 `restart_recovery_scheduled`, `worktree_resumed` event로 남고 pending fallback 복구는 `fallback_recovery_scheduled`로 남는다.
 
 하네스와 결과 검증을 통과한 commit은 push 전에 `publish_checkpoints`에 기록한다. push 인증, push URL 또는 일시적인 원격 오류가 발생하면 해당 worktree를 제거하지 않는다. 다음 시도는 `worktree_resumed`, `publish_retry_resumed`를 남기고 checkpoint commit부터 push를 재시도한다. 원격 target이 움직였으면 기존 절차대로 merge한 뒤 하네스와 결과 검증을 다시 실행한다. fetch URL과 `git remote get-url --push` 결과가 모두 설정한 `github` 저장소와 일치해야 push를 시작한다.

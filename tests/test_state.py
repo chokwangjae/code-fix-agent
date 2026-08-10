@@ -10,6 +10,40 @@ from test_contract import event
 
 
 class StateTest(unittest.TestCase):
+    def test_selects_older_fallback_before_new_review_batch(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                    'publish_mode = "direct"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            first_event = event()
+            second_event = event()
+            second_event["findings"][0]["fingerprint"] = "sha256:" + "d" * 64
+            with StateStore(config.state_dir) as state:
+                first = state.accept(
+                    config.repositories[0], parse_review_event(first_event)
+                )
+                first_batch = state.claim_next_batch(config.repositories)
+                state.mark_finding_fallback(
+                    (first_batch.jobs[0].id,), "batch harness failed"
+                )
+                state.accept(
+                    config.repositories[0], parse_review_event(second_event)
+                )
+                claim_kind = state.next_claim_kind(config.repositories)
+                claimed = state.claim_next(config.repositories)
+
+        self.assertEqual(claim_kind, "finding")
+        self.assertEqual(claimed.id, first.job_ids[0])
+
     def test_records_and_updates_publish_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

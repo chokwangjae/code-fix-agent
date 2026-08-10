@@ -747,6 +747,35 @@ class StateStore:
             raise
         return Job(**dict(claimed)) if claimed is not None else None
 
+    def next_claim_kind(
+        self, repositories: tuple[RepositoryConfig, ...]
+    ) -> str | None:
+        if self.worker_control().paused:
+            return None
+        settings = {repository.id: repository for repository in repositories}
+        rows = self.connection.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status IN ('queued', 'failed')
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            ORDER BY created_at, id
+            """,
+            (_now(),),
+        ).fetchall()
+        for row in rows:
+            repository = settings.get(row["repository_id"])
+            if repository is None:
+                continue
+            if repository.max_attempts and row["attempts"] >= repository.max_attempts:
+                continue
+            if bool(row["fallback_finding"]):
+                return "finding"
+            if repository.processing_mode == "finding":
+                return "finding"
+            if row["batch_id"] is not None:
+                return "batch"
+        return None
+
     def claim_next_batch(
         self, repositories: tuple[RepositoryConfig, ...]
     ) -> BatchClaim | None:
