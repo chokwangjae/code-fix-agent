@@ -63,6 +63,12 @@ class _SetupState:
     signature: str | None = None
 
 
+@dataclass(frozen=True)
+class _PendingFallback:
+    jobs: tuple[Job, ...]
+    reason: str
+
+
 class _BatchCorrectionRequired(FixAgentError):
     def __init__(self, message: str, groups: tuple[BatchChangeGroup, ...]) -> None:
         super().__init__(message)
@@ -158,6 +164,7 @@ class FixWorker:
                         "rejected",
                         "skipped",
                         "queued",
+                        "fallback_pending",
                     }:
                         continue
                     scheduled = state.mark_failed(
@@ -215,6 +222,7 @@ class FixWorker:
         )
         with StateStore(self.config.state_dir) as state:
             resumable_worktree = state.resumable_batch_worktree(batch.id)
+        pending_fallbacks: tuple[_PendingFallback, ...] = ()
         try:
             with FixWorkspace(
                 self.runner,
@@ -222,6 +230,7 @@ class FixWorker:
                 primary,
                 self.config.state_dir,
                 resumable_worktree=resumable_worktree,
+                worktree_scope="batch",
             ) as workspace:
                 environment = workspace.safe_environment
                 setup_state = _SetupState()
@@ -258,7 +267,12 @@ class FixWorker:
                     setup_state,
                 )
                 if valid_jobs:
-                    groups, tests, postcheck = self._fix_batch_until_valid(
+                    (
+                        groups,
+                        tests,
+                        postcheck,
+                        pending_fallbacks,
+                    ) = self._fix_batch_until_valid(
                         batch,
                         repository,
                         valid_jobs,
@@ -302,7 +316,12 @@ class FixWorker:
                                     for job in publish_jobs
                                     if job.fingerprint in correction_fingerprints
                                 )
-                                groups, tests, postcheck = self._fix_batch_until_valid(
+                                (
+                                    groups,
+                                    tests,
+                                    postcheck,
+                                    correction_fallbacks,
+                                ) = self._fix_batch_until_valid(
                                     batch,
                                     repository,
                                     publish_jobs,
@@ -311,6 +330,7 @@ class FixWorker:
                                     setup_state,
                                     initial_error=str(exc),
                                 )
+                                pending_fallbacks += correction_fallbacks
                                 grouped_fingerprints = {
                                     fingerprint
                                     for group in groups
@@ -324,6 +344,10 @@ class FixWorker:
             if not workspace.cleanup_complete:
                 raise FixAgentError("batch worktree cleanup did not complete after push")
             with StateStore(self.config.state_dir) as state:
+                for fallback in pending_fallbacks:
+                    state.activate_finding_fallback(
+                        tuple(job.id for job in fallback.jobs), fallback.reason
+                    )
                 for job in (*already_published, *valid_jobs):
                     current = state.job(job.id)
                     if current is not None and current.status == "pushed":
@@ -447,8 +471,10 @@ class FixWorker:
         tuple[BatchChangeGroup, ...],
         list[dict[str, object]],
         BatchFixDecision | None,
+        tuple[_PendingFallback, ...],
     ]:
         active = jobs
+        pending_fallbacks: list[_PendingFallback] = []
         iteration = 1
         previous_error = initial_error or next(
             (job.last_error for job in jobs if job.last_error), None
@@ -566,7 +592,7 @@ class FixWorker:
                         + postcheck.reason
                     )
                 workspace.validate_diff(tuple(job.file for job in active))
-                return postcheck.groups, tests, postcheck
+                return postcheck.groups, tests, postcheck, tuple(pending_fallbacks)
             except EnvironmentSetupError:
                 raise
             except FixAgentError as exc:
@@ -598,9 +624,12 @@ class FixWorker:
                 )
                 if repeated_contract_failures >= 2:
                     with StateStore(self.config.state_dir) as state:
-                        state.mark_finding_fallback(
+                        state.mark_finding_fallback_pending(
                             tuple(job.id for job in active), previous_error
                         )
+                    pending_fallbacks.append(
+                        _PendingFallback(active, previous_error)
+                    )
                     self._batch_event(
                         active,
                         "batch_fallback_started",
@@ -613,7 +642,7 @@ class FixWorker:
                         },
                         notify=True,
                     )
-                    return (), [], None
+                    return (), [], None, tuple(pending_fallbacks)
                 if iteration >= 2 and groups:
                     problem = self.agent.diagnose_batch_failure(
                         repository,
@@ -634,9 +663,12 @@ class FixWorker:
                     )
                     workspace.discard_group_changes(problem_group.files)
                     with StateStore(self.config.state_dir) as state:
-                        state.mark_finding_fallback(
+                        state.mark_finding_fallback_pending(
                             tuple(job.id for job in isolated), previous_error
                         )
+                    pending_fallbacks.append(
+                        _PendingFallback(isolated, previous_error)
+                    )
                     self._batch_event(
                         isolated,
                         "batch_fallback_started",
@@ -654,7 +686,7 @@ class FixWorker:
                     iteration = 1
                     continue
                 iteration += 1
-        return (), [], None
+        return (), [], None, tuple(pending_fallbacks)
 
     def _publish_batch_groups(
         self,
@@ -985,7 +1017,9 @@ class FixWorker:
             return
 
         with StateStore(self.config.state_dir) as state:
-            resumable_worktree = state.resumable_worktree(job.id)
+            resumable_worktree = state.resumable_worktree(
+                job.id, scope="finding"
+            )
         with FixWorkspace(
             self.runner,
             repository,

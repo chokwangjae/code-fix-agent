@@ -89,7 +89,10 @@ class FixWorkspace:
         state_dir: Path,
         *,
         resumable_worktree: tuple[str, str] | None = None,
+        worktree_scope: str = "finding",
     ) -> None:
+        if worktree_scope not in {"batch", "finding"}:
+            raise ValueError(f"invalid worktree scope: {worktree_scope}")
         self.runner = runner
         self.repository = repository
         self.job = job
@@ -97,6 +100,7 @@ class FixWorkspace:
         worktrees = state_dir / "worktrees"
         worktrees.mkdir(parents=True, exist_ok=True)
         self._resumable_worktree = resumable_worktree
+        self.worktree_scope = worktree_scope
         if resumable_worktree is None:
             self.root = Path(tempfile.mkdtemp(prefix="fix-", dir=worktrees))
             self.path = self.root / "checkout"
@@ -152,6 +156,7 @@ class FixWorkspace:
                 "path": str(path),
                 "recorded_base_commit": recorded_base,
                 "base_commit": self.base_commit,
+                "scope": self.worktree_scope,
                 "checked_files": permissions.checked_files,
                 "checked_directories": permissions.checked_directories,
                 "repaired_files": permissions.repaired_files,
@@ -265,6 +270,7 @@ class FixWorkspace:
                 "remote": self.repository.remote,
                 "target_branch": self.repository.target_branch,
                 "base_commit": self.base_commit,
+                "scope": self.worktree_scope,
             },
         )
         self._record_event(

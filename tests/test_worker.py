@@ -349,6 +349,15 @@ test_commands = []
         self.assertEqual(queued.status, "queued")
         self.assertEqual(queued.fallback_finding, 1)
         self.assertIn("batch_fallback_started", [event.event_type for event in events])
+        event_types = [event.event_type for event in events]
+        self.assertLess(
+            event_types.index("worktree_removed"),
+            event_types.index("batch_finding_fallback"),
+        )
+        created = next(
+            event for event in events if event.event_type == "worktree_created"
+        )
+        self.assertIn('"scope": "batch"', created.details_json)
 
     def test_repairs_permissions_changed_by_fix_before_harness(self) -> None:
         with TemporaryDirectory() as directory:

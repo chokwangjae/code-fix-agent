@@ -74,14 +74,129 @@ class StateTest(unittest.TestCase):
             with StateStore(config.state_dir) as state:
                 state.accept(config.repositories[0], parse_review_event(event()))
                 batch = state.claim_next_batch(config.repositories)
-                state.mark_finding_fallback(
+                shared_worktree = root / "shared-worktree"
+                shared_worktree.mkdir()
+                state.record_event(
+                    batch.jobs[0].id,
+                    "worktree_created",
+                    "legacy batch worktree",
+                    {
+                        "path": str(shared_worktree),
+                        "base_commit": batch.jobs[0].target_commit,
+                    },
+                )
+                state.mark_finding_fallback_pending(
+                    (batch.jobs[0].id,), "repeated harness failure"
+                )
+                pending_claim = state.claim_next(config.repositories)
+                finding_resume = state.resumable_worktree(
+                    batch.jobs[0].id, scope="finding"
+                )
+                batch_resume = state.resumable_worktree(
+                    batch.jobs[0].id, scope="batch"
+                )
+                state.activate_finding_fallback(
                     (batch.jobs[0].id,), "repeated harness failure"
                 )
                 isolated = state.claim_next(config.repositories)
 
+        self.assertIsNone(pending_claim)
+        self.assertIsNone(finding_resume)
+        self.assertEqual(batch_resume[0], str(shared_worktree))
         self.assertEqual(isolated.id, batch.jobs[0].id)
         self.assertEqual(isolated.fallback_finding, 1)
         self.assertEqual(isolated.attempts, 1)
+
+    def test_restart_activates_pending_finding_fallback(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                    'publish_mode = "direct"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                batch = state.claim_next_batch(config.repositories)
+                state.mark_finding_fallback_pending(
+                    (batch.jobs[0].id,), "batch response failed"
+                )
+                recovered = state.recover_interrupted_jobs()
+                resumed = state.claim_next(config.repositories)
+                events = state.events(batch.jobs[0].id)
+
+        self.assertEqual(recovered, (batch.jobs[0].id,))
+        self.assertEqual(resumed.id, batch.jobs[0].id)
+        self.assertEqual(resumed.fallback_finding, 1)
+        self.assertIn(
+            "fallback_recovery_scheduled",
+            [item.event_type for item in events],
+        )
+
+    def test_worktree_removal_only_closes_the_matching_path(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                self._config().replace(
+                    'github_token_env = "FIX_GITHUB_TOKEN"',
+                    'github_token_env = "FIX_GITHUB_TOKEN"\n'
+                    'publish_mode = "direct"\n'
+                    'processing_mode = "review_batch"',
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            shared = root / "shared"
+            finding = root / "finding"
+            shared.mkdir()
+            finding.mkdir()
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], parse_review_event(event()))
+                batch = state.claim_next_batch(config.repositories)
+                job = batch.jobs[0]
+                state.record_event(
+                    job.id,
+                    "worktree_created",
+                    "batch worktree created",
+                    {
+                        "path": str(shared),
+                        "base_commit": job.target_commit,
+                        "scope": "batch",
+                    },
+                )
+                state.mark_finding_fallback_pending(
+                    (job.id,), "batch response failed"
+                )
+                state.record_event(
+                    job.id,
+                    "worktree_created",
+                    "finding worktree created",
+                    {
+                        "path": str(finding),
+                        "base_commit": job.target_commit,
+                        "scope": "finding",
+                    },
+                )
+                state.record_event(
+                    job.id,
+                    "worktree_removed",
+                    "batch worktree removed",
+                    {"path": str(shared)},
+                )
+                finding_resume = state.resumable_worktree(
+                    job.id, scope="finding"
+                )
+                batch_resume = state.resumable_worktree(job.id, scope="batch")
+
+        self.assertEqual(finding_resume[0], str(finding))
+        self.assertIsNone(batch_resume)
 
     def test_accepts_once_and_deduplicates_by_fingerprint(self) -> None:
         with TemporaryDirectory() as directory:

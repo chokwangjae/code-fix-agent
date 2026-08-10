@@ -131,6 +131,10 @@ one change group. Assign every changed file to exactly one group, including supp
 files. Do not commit, push, create a branch, modify Git configuration, or access
 credentials.
 
+The server owns these minimum groups. You may combine groups when one fix or support
+file cannot be separated, but you must not split a group:
+{json.dumps(_canonical_group_payload(jobs), ensure_ascii=False, indent=2)}
+
 Repository-specific additional instructions:
 {rules}
 {retry}
@@ -607,6 +611,20 @@ def _group_payload(groups: tuple[BatchChangeGroup, ...]) -> list[dict[str, objec
     ]
 
 
+def _canonical_group_payload(jobs: tuple[Job, ...]) -> list[dict[str, object]]:
+    groups: dict[str, list[str]] = {}
+    for job in jobs:
+        groups.setdefault(job.file, []).append(job.fingerprint)
+    return [
+        {
+            "group_id": f"finding-file-{index}",
+            "finding_file": file,
+            "fingerprints": fingerprints,
+        }
+        for index, (file, fingerprints) in enumerate(groups.items(), start=1)
+    ]
+
+
 def _batch_finding_decisions(
     raw: dict[str, object], jobs: tuple[Job, ...], key: str
 ) -> tuple[BatchFindingDecision, ...]:
@@ -648,7 +666,7 @@ def _batch_groups(
     expected = {job.fingerprint for job in jobs}
     finding_files = {job.fingerprint: job.file for job in jobs}
     seen_fingerprints: set[str] = set()
-    groups_by_finding_file: dict[str, BatchChangeGroup] = {}
+    groups: list[BatchChangeGroup] = []
     for value in values:
         if not isinstance(value, dict):
             raise FixAgentError("Codex batch response contains an invalid group")
@@ -672,45 +690,43 @@ def _batch_groups(
         ):
             raise FixAgentError("Codex batch response contains overlapping groups")
         named_files = {finding_files[item] for item in fingerprint_set}
-        if len(named_files) != 1 or not named_files.issubset(file_set):
+        if not named_files.issubset(file_set):
             raise FixAgentError(
-                "Codex batch groups must merge findings that name the same file"
+                "Codex batch groups must include every named finding file"
             )
         title = value.get("commit_title")
         if require_titles:
             title = _validated_commit_title(title)
         elif title is not None:
             title = _validated_commit_title(title)
-        named_file = next(iter(named_files))
-        current = groups_by_finding_file.get(named_file)
-        groups_by_finding_file[named_file] = BatchChangeGroup(
-            tuple(
-                dict.fromkeys(
-                    (*current.fingerprints, *fingerprints)
-                    if current is not None
-                    else fingerprints
-                )
-            ),
-            tuple(
-                dict.fromkeys(
-                    (*current.files, *files) if current is not None else files
-                )
-            ),
-            (
-                current.commit_title
-                if current is not None and current.commit_title is not None
-                else title if isinstance(title, str) else None
-            ),
+        groups.append(
+            BatchChangeGroup(
+                tuple(fingerprints),
+                tuple(files),
+                title if isinstance(title, str) else None,
+            )
         )
         seen_fingerprints.update(fingerprint_set)
     if seen_fingerprints != expected:
         raise FixAgentError("Codex batch response must group every fingerprint once")
-    groups = list(groups_by_finding_file.values())
-    seen_files: set[str] = set()
-    for group in groups:
-        if seen_files.intersection(group.files):
-            raise FixAgentError("Codex batch response contains overlapping groups")
-        seen_files.update(group.files)
+    merged = True
+    while merged:
+        merged = False
+        for left_index, left in enumerate(groups):
+            for right_index in range(left_index + 1, len(groups)):
+                right = groups[right_index]
+                if not set(left.files).intersection(right.files):
+                    continue
+                groups[left_index] = BatchChangeGroup(
+                    tuple(dict.fromkeys((*left.fingerprints, *right.fingerprints))),
+                    tuple(dict.fromkeys((*left.files, *right.files))),
+                    left.commit_title or right.commit_title,
+                )
+                del groups[right_index]
+                merged = True
+                break
+            if merged:
+                break
     return tuple(groups)
 
 

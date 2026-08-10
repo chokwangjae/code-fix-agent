@@ -722,6 +722,69 @@ class StateStore:
                     status="queued",
                 )
 
+    def mark_finding_fallback_pending(
+        self, job_ids: tuple[int, ...], reason: str
+    ) -> None:
+        if not job_ids:
+            return
+        placeholders = ",".join("?" for _ in job_ids)
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                f"""
+                UPDATE jobs
+                SET fallback_finding = 1, status = 'fallback_pending', attempts = 0,
+                    last_error = ?, next_attempt_at = NULL, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (reason[:20_000], now, *job_ids),
+            )
+            for job_id in job_ids:
+                self._insert_event(
+                    job_id,
+                    "batch_finding_fallback_pending",
+                    "finding fallback is waiting for batch worktree cleanup",
+                    {"reason": reason[:4_000]},
+                    status="fallback_pending",
+                )
+
+    def activate_finding_fallback(
+        self, job_ids: tuple[int, ...], reason: str
+    ) -> None:
+        if not job_ids:
+            return
+        placeholders = ",".join("?" for _ in job_ids)
+        now = _now()
+        with self.connection:
+            rows = self.connection.execute(
+                f"""
+                SELECT id FROM jobs
+                WHERE id IN ({placeholders}) AND status = 'fallback_pending'
+                ORDER BY id
+                """,
+                job_ids,
+            ).fetchall()
+            activated = tuple(int(row["id"]) for row in rows)
+            if not activated:
+                return
+            activated_placeholders = ",".join("?" for _ in activated)
+            self.connection.execute(
+                f"""
+                UPDATE jobs
+                SET status = 'queued', next_attempt_at = NULL, updated_at = ?
+                WHERE id IN ({activated_placeholders})
+                """,
+                (now, *activated),
+            )
+            for job_id in activated:
+                self._insert_event(
+                    job_id,
+                    "batch_finding_fallback",
+                    "batch cleanup completed and finding fallback was queued",
+                    {"reason": reason[:4_000]},
+                    status="queued",
+                )
+
     def recover_interrupted_jobs(self) -> tuple[int, ...]:
         now = _now()
         recovered: list[int] = []
@@ -731,12 +794,33 @@ class StateStore:
                 """
                 SELECT id, status, attempts, last_error
                 FROM jobs
-                WHERE status IN ('validating', 'fixing', 'testing', 'ready', 'pushed')
+                WHERE status IN (
+                    'validating', 'fixing', 'testing', 'ready', 'pushed',
+                    'fallback_pending'
+                )
                 ORDER BY id
                 """
             ).fetchall()
             for row in rows:
                 previous_status = row["status"]
+                if previous_status == "fallback_pending":
+                    self.connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'queued', next_attempt_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, now, row["id"]),
+                    )
+                    self._insert_event(
+                        row["id"],
+                        "fallback_recovery_scheduled",
+                        "interrupted fallback will start in a finding worktree",
+                        {"previous_status": previous_status},
+                        status="queued",
+                    )
+                    recovered.append(row["id"])
+                    continue
                 interruption = (
                     f"process restarted while job was {previous_status}; "
                     "resume the recorded worktree"
@@ -776,44 +860,80 @@ class StateStore:
             raise
         return tuple(recovered)
 
-    def resumable_worktree(self, job_id: int) -> tuple[str, str] | None:
-        row = self.connection.execute(
+    def resumable_worktree(
+        self, job_id: int, *, scope: str = "finding"
+    ) -> tuple[str, str] | None:
+        if scope not in {"batch", "finding"}:
+            raise ValueError(f"invalid worktree scope: {scope}")
+        rows = self.connection.execute(
             """
             SELECT id, details_json
             FROM job_events
             WHERE job_id = ? AND event_type = 'worktree_created'
             ORDER BY id DESC
-            LIMIT 1
             """,
             (job_id,),
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if not rows:
             return None
-        removed = self.connection.execute(
+        removed_rows = self.connection.execute(
             """
-            SELECT id
+            SELECT id, details_json
             FROM job_events
             WHERE job_id = ? AND event_type = 'worktree_removed'
             ORDER BY id DESC
-            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchall()
+        job = self.connection.execute(
+            "SELECT batch_id, fallback_finding FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        fallback = self.connection.execute(
+            """
+            SELECT MAX(id) AS id FROM job_events
+            WHERE job_id = ? AND event_type IN (
+                'batch_fallback_started', 'batch_finding_fallback',
+                'batch_finding_fallback_pending'
+            )
             """,
             (job_id,),
         ).fetchone()
-        if removed is not None and removed["id"] > row["id"]:
-            return None
-        try:
-            details = json.loads(row["details_json"])
-        except json.JSONDecodeError:
-            return None
-        path = details.get("path") if isinstance(details, dict) else None
-        base_commit = details.get("base_commit") if isinstance(details, dict) else None
-        if not isinstance(path, str) or not path:
-            return None
-        if not isinstance(base_commit, str) or not base_commit:
-            return None
-        if not Path(path).is_dir():
-            return None
-        return path, base_commit
+        fallback_event_id = int(fallback["id"] or 0) if fallback is not None else 0
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(details, dict):
+                continue
+            recorded_scope = details.get("scope")
+            if isinstance(recorded_scope, str):
+                if recorded_scope != scope:
+                    continue
+            elif (
+                scope == "finding"
+                and job is not None
+                and job["batch_id"] is not None
+                and bool(job["fallback_finding"])
+                and int(row["id"]) < fallback_event_id
+            ):
+                continue
+            path = details.get("path")
+            base_commit = details.get("base_commit")
+            if not isinstance(path, str) or not path:
+                continue
+            if not isinstance(base_commit, str) or not base_commit:
+                continue
+            if any(
+                int(removed["id"]) > int(row["id"])
+                and _event_path(removed["details_json"]) == path
+                for removed in removed_rows
+            ):
+                continue
+            if not Path(path).is_dir():
+                continue
+            return path, base_commit
+        return None
 
     def resumable_batch_worktree(self, batch_id: str) -> tuple[str, str] | None:
         rows = self.connection.execute(
@@ -827,7 +947,9 @@ class StateStore:
             (batch_id,),
         ).fetchall()
         for row in rows:
-            resumable = self.resumable_worktree(int(row["job_id"]))
+            resumable = self.resumable_worktree(
+                int(row["job_id"]), scope="batch"
+            )
             if resumable is not None:
                 return resumable
         return None
@@ -983,3 +1105,14 @@ class StateStore:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _event_path(details_json: str) -> str | None:
+    try:
+        details = json.loads(details_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(details, dict):
+        return None
+    path = details.get("path")
+    return path if isinstance(path, str) else None

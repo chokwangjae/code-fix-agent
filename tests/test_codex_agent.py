@@ -109,6 +109,73 @@ class CodexAgentTest(unittest.TestCase):
         self.assertEqual(groups[0].fingerprints, (first.fingerprint, second.fingerprint))
         self.assertEqual(groups[0].files, (first.file,))
 
+    def test_batch_groups_accept_multiple_named_files_in_one_group(self) -> None:
+        first = job(fingerprint="sha256:" + "c" * 64, file="src/first.py")
+        second = job(
+            id=2, fingerprint="sha256:" + "d" * 64, file="src/second.py"
+        )
+        runner = FakeRunner(
+            json.dumps(
+                {
+                    "groups": [
+                        {
+                            "fingerprints": [first.fingerprint, second.fingerprint],
+                            "files": [first.file, second.file],
+                        }
+                    ]
+                }
+            )
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            groups = CodexAgent(runner, "/usr/bin/codex").apply_batch_fixes(
+                repository,
+                (first, second),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+                "b" * 40,
+            )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].fingerprints, (first.fingerprint, second.fingerprint))
+        self.assertEqual(groups[0].files, (first.file, second.file))
+
+    def test_batch_groups_merge_groups_that_share_a_support_file(self) -> None:
+        first = job(fingerprint="sha256:" + "c" * 64, file="src/first.py")
+        second = job(
+            id=2, fingerprint="sha256:" + "d" * 64, file="src/second.py"
+        )
+        support = "src/shared.py"
+        runner = FakeRunner(
+            json.dumps(
+                {
+                    "groups": [
+                        {
+                            "fingerprints": [first.fingerprint],
+                            "files": [first.file, support],
+                        },
+                        {
+                            "fingerprints": [second.fingerprint],
+                            "files": [second.file, support],
+                        },
+                    ]
+                }
+            )
+        )
+        with TemporaryDirectory() as directory:
+            repository = self._repository(Path(directory))
+            groups = CodexAgent(runner, "/usr/bin/codex").apply_batch_fixes(
+                repository,
+                (first, second),
+                Path(directory),
+                {"PATH": "/usr/bin"},
+                "b" * 40,
+            )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].fingerprints, (first.fingerprint, second.fingerprint))
+        self.assertEqual(groups[0].files, (first.file, support, second.file))
+
     def test_records_specific_independent_validation_reason(self) -> None:
         runner = FakeRunner('{"valid":true,"reason":"Caller drops exit 1."}')
         with TemporaryDirectory() as directory:
