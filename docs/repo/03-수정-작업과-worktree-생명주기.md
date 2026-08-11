@@ -32,7 +32,10 @@ setup_watch_paths = [
 command_timeout_seconds = 7200
 codex_timeout_seconds = 3600
 harness_timeout_seconds = 1800
-job_timeout_seconds = 7200
+fallback_after_seconds = 5400
+publish_priority_after_seconds = 6600
+target_duration_seconds = 7200
+hard_timeout_seconds = 14400
 setup_max_attempts = 3
 setup_retry_delay_seconds = 15
 max_attempts = 0
@@ -40,7 +43,9 @@ retry_delay_seconds = 30
 max_remote_merge_attempts = 3
 ```
 
-`max_attempts = 0`은 시도 횟수만 제한하지 않는다. `job_timeout_seconds`는 최초 claim 시각부터 재시작과 재시도를 합산하며 기본값은 7200초다. 시간 예산을 모두 쓰면 재시도를 예약하지 않고 `failed`로 끝낸다. 양수 `max_attempts`는 최초 시도를 포함한 최대 횟수다. 정책·하네스·결과 검증 실패는 같은 worktree에서 바로 보완한다. 프로세스를 재시작하면 진행 중 job을 재시도 횟수 차감 없이 다시 대기열에 넣되 누적 시간은 초기화하지 않는다. 기록된 worktree가 남아 있으면 기존 diff와 commit을 보존한 채 같은 경로에서 이어가고, 경로가 없으면 최신 target에서 새 worktree를 만든다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
+`max_attempts = 0`은 시도 횟수만 제한하지 않는다. 최초 claim 시각부터 `target_duration_seconds`까지는 완료 목표이며 기본값은 7200초다. 목표를 넘겨도 작업을 중단하지 않고 `timing_status = "overdue"`, 초과 시각과 사유를 기록한다. `hard_timeout_seconds` 기본값은 14400초다. 이 한도에 도달하면 재시도를 예약하지 않고 `failed`로 끝내되 worktree와 commit checkpoint를 보존한다. 이전 `job_timeout_seconds`만 설정한 저장소는 그 값을 목표 시간으로 해석하고 최대 시간은 두 배로 계산한다. 두 키를 함께 설정하면 오류다.
+
+양수 `max_attempts`는 최초 시도를 포함한 최대 횟수다. 정책·하네스·결과 검증 실패는 같은 worktree에서 바로 보완한다. 프로세스를 재시작하면 진행 중 job을 재시도 횟수 차감 없이 다시 대기열에 넣되 최초 claim 시각은 초기화하지 않는다. push 재시도도 검증 commit checkpoint에서 시작하며 시간 기준을 새로 잡지 않는다. 기록된 worktree가 남아 있으면 기존 diff와 commit을 보존한 채 같은 경로에서 이어가고, 경로가 없으면 최신 target에서 새 worktree를 만든다. severity·경로·fingerprint 예외는 `skipped`, 독립 사실 검증의 오탐은 `rejected`로 끝낸다.
 
 Codex 호출별 제한은 `codex_timeout_seconds`, 하네스 명령별 제한은 `harness_timeout_seconds`, 준비·Git 명령 제한은 `command_timeout_seconds`다. finding 보완에서 같은 오류가 두 번 이어지거나 Codex 호출 전후 worktree fingerprint가 같으면 진행 불가로 판정해 재시도를 멈춘다. 배치 수정이 diff를 바꾸지 못하면 batch 전체를 다시 호출하지 않고 관련 finding을 `fallback_pending`으로 옮긴다.
 

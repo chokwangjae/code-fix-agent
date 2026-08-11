@@ -295,7 +295,10 @@ class ConfigTest(unittest.TestCase):
                 "command_timeout_seconds = 5000\n"
                 "codex_timeout_seconds = 2400\n"
                 "harness_timeout_seconds = 900\n"
-                "job_timeout_seconds = 7200\n",
+                "fallback_after_seconds = 5400\n"
+                "publish_priority_after_seconds = 6600\n"
+                "target_duration_seconds = 7200\n"
+                "hard_timeout_seconds = 14400\n",
             )
             path.write_text(value, encoding="utf-8")
             config = load_config(path)
@@ -304,7 +307,23 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(repository.command_timeout_seconds, 5000)
         self.assertEqual(repository.codex_timeout_seconds, 2400)
         self.assertEqual(repository.harness_timeout_seconds, 900)
-        self.assertEqual(repository.job_timeout_seconds, 7200)
+        self.assertEqual(repository.fallback_after_seconds, 5400)
+        self.assertEqual(repository.publish_priority_after_seconds, 6600)
+        self.assertEqual(repository.target_duration_seconds, 7200)
+        self.assertEqual(repository.hard_timeout_seconds, 14400)
+
+    def test_maps_legacy_job_timeout_to_target_duration(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "fix.toml"
+            value = self._config().replace(
+                "[repositories.execution]\n",
+                "[repositories.execution]\njob_timeout_seconds = 6000\n",
+            )
+            path.write_text(value, encoding="utf-8")
+            repository = load_config(path).repositories[0]
+
+        self.assertEqual(repository.target_duration_seconds, 6000)
+        self.assertEqual(repository.hard_timeout_seconds, 12000)
 
     def test_rejects_excessive_concurrent_worker_limit(self) -> None:
         with TemporaryDirectory() as directory:

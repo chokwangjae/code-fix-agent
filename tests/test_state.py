@@ -10,6 +10,24 @@ from test_contract import event
 
 
 class StateTest(unittest.TestCase):
+    def test_records_overdue_timing_without_changing_job_status(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "fix.toml"
+            config_path.write_text(self._config(), encoding="utf-8")
+            config = load_config(config_path)
+            with StateStore(config.state_dir) as state:
+                intake = state.accept(
+                    config.repositories[0], parse_review_event(event())
+                )
+                state.mark_overdue(intake.job_ids, "target duration exceeded")
+                recorded = state.job(intake.job_ids[0])
+
+        self.assertEqual(recorded.status, "queued")
+        self.assertEqual(recorded.timing_status, "overdue")
+        self.assertIsNotNone(recorded.target_exceeded_at)
+        self.assertEqual(recorded.overdue_reason, "target duration exceeded")
+
     def test_selects_older_fallback_before_new_review_batch(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

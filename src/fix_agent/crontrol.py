@@ -129,6 +129,12 @@ class CrontrolReporter:
             "currentJobId": current.id if current is not None else None,
             "currentRepository": current.repository if current is not None else None,
             "currentStage": current_stage,
+            "currentTimingStatus": (
+                current.timing_status if current is not None else None
+            ),
+            "currentOverdueReason": (
+                current.overdue_reason if current is not None else None
+            ),
             "queuedJobs": queued,
             "runningJobCount": len(running_jobs),
             "maxConcurrentJobs": self.config.server.max_concurrent_jobs,
@@ -140,6 +146,8 @@ class CrontrolReporter:
                     "stage": _display(
                         self._stages.get(job.id) or self._job_stage(job), 120
                     ),
+                    "timingStatus": job.timing_status,
+                    "overdueReason": job.overdue_reason,
                 }
                 for job in reversed(running_jobs)
             ],
@@ -166,7 +174,10 @@ class CrontrolReporter:
     def _job_stage(self, job: Job) -> str:
         if job.status == "failed" and self._retryable(job):
             return "재시도 대기"
-        return _status_stage(job.status)
+        stage = _status_stage(job.status)
+        if job.timing_status == "overdue":
+            return f"목표 시간 초과 · {stage}"
+        return stage
 
     def _send(self, payload: dict[str, object]) -> None:
         job_url = (

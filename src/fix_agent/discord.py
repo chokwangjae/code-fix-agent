@@ -23,6 +23,10 @@ _NOTIFIABLE_EVENTS = {
     "result_validation_completed",
     "fix_iteration_failed",
     "batch_fallback_started",
+    "duration_fallback_threshold",
+    "duration_publish_priority",
+    "duration_target_exceeded",
+    "duration_hard_timeout",
     "restart_recovery_scheduled",
     "retry_scheduled",
     "target_moved",
@@ -109,6 +113,14 @@ def _presentation(event: JobEvent) -> tuple[str, int]:
         return "🔄 코드 수정 보완 계속", WARNING_COLOR
     if event.event_type == "batch_fallback_started":
         return "🔄 문제 finding 개별 처리 전환", WARNING_COLOR
+    if event.event_type == "duration_fallback_threshold":
+        return "⏱️ 지연 finding 분리 기준 적용", WARNING_COLOR
+    if event.event_type == "duration_publish_priority":
+        return "⏱️ 완료 수정 우선 반영", WARNING_COLOR
+    if event.event_type == "duration_target_exceeded":
+        return "⏱️ 목표 시간 초과 후 처리 계속", WARNING_COLOR
+    if event.event_type == "duration_hard_timeout":
+        return "❌ 최대 실행 시간 도달", FAIL_COLOR
     if event.event_type == "restart_recovery_scheduled":
         return "🔄 코드 수정 재시작 복구", WARNING_COLOR
     if event.event_type == "retry_scheduled":

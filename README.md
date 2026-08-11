@@ -151,7 +151,7 @@ conditional_test_commands = [
 
 worktree 생성 직후 Git이 추적하는 파일과 디렉터리에 현재 실행 사용자의 읽기·쓰기 권한을 보장하고 쓰기 probe를 실행한다. 삭제된 tracked 파일의 부모 경로가 이미 없어졌다면 권한 검사에서 제외한다. Codex 수정 전, 환경 준비 명령 전후, 하네스 실행 전과 worktree 제거 전에도 같은 검사를 반복한다. 설치 cache는 `.fix-agent/runtime-cache/<repository-key>` 아래에 분리하며 `HOME`과 원본 저장소 `local_path`의 권한은 바꾸지 않는다.
 
-Codex는 `codex_timeout_seconds`, 하네스는 `harness_timeout_seconds`, 그 밖의 준비·Git 명령은 `command_timeout_seconds`를 적용한다. 각 제한을 넘기면 자식까지 포함한 프로세스 그룹을 종료한다. `job_timeout_seconds`는 최초 claim부터 재시작과 재시도를 합친 누적 시간이며 기본값은 7200초다. 시간 예산을 모두 쓰거나 finding 보완에서 같은 오류가 두 번 발생하거나 Codex가 diff를 바꾸지 못하면 해당 job을 재시도 없는 `failed`로 끝낸다. 배치 수정이 diff를 바꾸지 못하면 finding 모드로 전환한다.
+Codex는 `codex_timeout_seconds`, 하네스는 `harness_timeout_seconds`, 그 밖의 준비·Git 명령은 `command_timeout_seconds`를 적용한다. 각 제한을 넘기면 자식까지 포함한 프로세스 그룹을 종료한다. 최초 claim부터 7200초는 완료 목표이며 실패 시점이 아니다. 목표를 넘기면 job의 `timing_status`를 `overdue`로 바꾸고 사유를 기록한 채 계속 처리한다. 기본 최대 시간인 14400초에 도달해야 재시도 없는 `failed`로 끝내며, 이때 worktree와 commit checkpoint를 제거하지 않는다. 이전 `job_timeout_seconds`는 호환을 위해 목표 시간으로 해석하지만 새 설정에는 `target_duration_seconds`를 사용한다.
 
 ```toml
 [[repositories]]
@@ -167,7 +167,10 @@ setup_watch_paths = ["web/package.json", "web/package-lock.json"]
 command_timeout_seconds = 7200
 codex_timeout_seconds = 3600
 harness_timeout_seconds = 1800
-job_timeout_seconds = 7200
+fallback_after_seconds = 5400
+publish_priority_after_seconds = 6600
+target_duration_seconds = 7200
+hard_timeout_seconds = 14400
 setup_max_attempts = 3
 setup_retry_delay_seconds = 15
 max_attempts = 0

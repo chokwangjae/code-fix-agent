@@ -579,7 +579,10 @@ local_path = "{repository_path}"
 github_token = "test-token"
 test_commands = []
 [repositories.execution]
-job_timeout_seconds = 1
+fallback_after_seconds = 1
+publish_priority_after_seconds = 2
+target_duration_seconds = 3
+hard_timeout_seconds = 4
 """,
                 encoding="utf-8",
             )
@@ -599,7 +602,8 @@ job_timeout_seconds = 1
 
         self.assertEqual(failed.status, "failed")
         self.assertIsNone(failed.next_attempt_at)
-        self.assertIn("time budget", failed.last_error)
+        self.assertIn("hard execution timeout", failed.last_error)
+        self.assertEqual(failed.timing_status, "overdue")
 
     def test_worker_loop_survives_unexpected_claim_error(self) -> None:
         class RecoveringWorker(FixWorker):

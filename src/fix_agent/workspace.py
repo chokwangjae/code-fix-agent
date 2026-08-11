@@ -15,7 +15,7 @@ import threading
 from .command import CommandRunner
 from .config import RepositoryConfig
 from .credentials import resolve_github_credential
-from .errors import FixAgentError
+from .errors import FixAgentError, JobTimeBudgetExceeded
 from .state import Job, StateStore
 
 
@@ -1212,8 +1212,15 @@ class FixWorkspace:
             raise
         return self
 
-    def __exit__(self, *_: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
         try:
+            if isinstance(exc, JobTimeBudgetExceeded) and not self._preserve_on_exit:
+                self.preserve(str(exc))
             if not self._preserve_on_exit:
                 self.close()
         finally:

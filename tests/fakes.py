@@ -34,6 +34,9 @@ def job(**overrides: object) -> Job:
         "batch_id": None,
         "fallback_finding": 0,
         "execution_started_at": None,
+        "timing_status": "on_time",
+        "target_exceeded_at": None,
+        "overdue_reason": None,
         "created_at": now,
         "updated_at": now,
     }

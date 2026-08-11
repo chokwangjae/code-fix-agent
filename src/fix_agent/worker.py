@@ -45,6 +45,10 @@ _CRONTROL_EVENT_STAGES = {
     "batch_validation_completed": "리뷰 배치 검증 완료",
     "batch_fix_started": "리뷰 배치 수정 중",
     "batch_fallback_started": "문제 finding 분리 중",
+    "duration_fallback_threshold": "지연 finding 분리 준비",
+    "duration_publish_priority": "완료 수정 우선 반영",
+    "duration_target_exceeded": "목표 시간 초과 처리",
+    "duration_hard_timeout": "최대 실행 시간 도달",
     "batch_metrics_recorded": "리뷰 배치 사용량 기록",
     "finding_git_validated": "Git 검증 완료",
     "environment_setup_started": "환경 준비 중",
@@ -131,6 +135,7 @@ class FixWorker:
         self.notifier.initialize_cursors()
         self._stop = threading.Event()
         self._current_job_id: int | None = None
+        self._started_at: datetime | None = None
         self._deadline: datetime | None = None
 
     def run_once(self) -> bool:
@@ -159,11 +164,19 @@ class FixWorker:
         self._current_job_id = job.id
         self.crontrol.sync(job.id, "작업 준비")
         try:
-            self._start_budget(
-                repository, None if job.result_commit else job.execution_started_at
-            )
+            self._start_budget(repository, job.execution_started_at)
             self._process(job)
         except Exception as exc:
+            if isinstance(exc, JobTimeBudgetExceeded):
+                with StateStore(self.config.state_dir) as state:
+                    state.mark_overdue((job.id,), str(exc))
+                self._event(
+                    job.id,
+                    "duration_hard_timeout",
+                    "최대 실행 시간 도달로 worktree와 checkpoint 보존 후 중단",
+                    self._duration_details(repository, "hard_timeout"),
+                    notify=True,
+                )
             retryable = not isinstance(exc, JobTerminalError) and (
                 repository.max_attempts == 0
                 or job.attempts < repository.max_attempts
@@ -193,6 +206,7 @@ class FixWorker:
             self.crontrol.sync(job.id)
             self._dispatch_notifications()
             self._current_job_id = None
+            self._started_at = None
             self._deadline = None
             self.crontrol.sync(None)
         return True
@@ -203,12 +217,21 @@ class FixWorker:
         self._current_job_id = primary.id
         self.crontrol.sync(primary.id, "리뷰 배치 준비")
         try:
-            self._start_budget(
-                repository,
-                None if any(job.result_commit for job in batch.jobs) else batch.started_at,
-            )
+            self._start_budget(repository, batch.started_at)
             self._process_batch(batch, repository)
         except Exception as exc:
+            if isinstance(exc, JobTimeBudgetExceeded):
+                with StateStore(self.config.state_dir) as state:
+                    state.mark_overdue(
+                        tuple(job.id for job in batch.jobs), str(exc)
+                    )
+                self._batch_event(
+                    batch.jobs,
+                    "duration_hard_timeout",
+                    "최대 실행 시간 도달로 batch worktree와 checkpoint 보존 후 중단",
+                    self._duration_details(repository, "hard_timeout"),
+                    notify=True,
+                )
             retryable = not isinstance(exc, JobTerminalError) and (
                 repository.max_attempts == 0
                 or batch.attempt < repository.max_attempts
@@ -239,6 +262,7 @@ class FixWorker:
             self.crontrol.sync(primary.id)
             self._dispatch_notifications()
             self._current_job_id = None
+            self._started_at = None
             self._deadline = None
             self.crontrol.sync(None)
         return True
@@ -266,16 +290,84 @@ class FixWorker:
         )
         if started.tzinfo is None:
             started = started.replace(tzinfo=timezone.utc)
-        self._deadline = started + timedelta(seconds=repository.job_timeout_seconds)
-        self._remaining_timeout(repository.job_timeout_seconds)
+        self._started_at = started
+        self._deadline = started + timedelta(seconds=repository.hard_timeout_seconds)
+        self._remaining_timeout(repository.hard_timeout_seconds)
 
     def _remaining_timeout(self, maximum: int) -> int:
         if self._deadline is None:
             return maximum
         remaining = (self._deadline - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0:
-            raise JobTimeBudgetExceeded("job execution time budget was exhausted")
+            raise JobTimeBudgetExceeded("job hard execution timeout was exhausted")
         return min(maximum, max(1, math.ceil(remaining)))
+
+    def _elapsed_seconds(self) -> int:
+        if self._started_at is None:
+            return 0
+        return max(
+            0,
+            math.floor(
+                (datetime.now(timezone.utc) - self._started_at).total_seconds()
+            ),
+        )
+
+    def _duration_details(
+        self, repository: RepositoryConfig, reason: str
+    ) -> dict[str, object]:
+        return {
+            "elapsed_seconds": self._elapsed_seconds(),
+            "fallback_after_seconds": repository.fallback_after_seconds,
+            "publish_priority_after_seconds": (
+                repository.publish_priority_after_seconds
+            ),
+            "target_duration_seconds": repository.target_duration_seconds,
+            "hard_timeout_seconds": repository.hard_timeout_seconds,
+            "reason": reason,
+        }
+
+    def _record_duration_milestones(
+        self,
+        repository: RepositoryConfig,
+        jobs: tuple[Job, ...],
+        reason: str,
+    ) -> None:
+        if not jobs:
+            return
+        elapsed = self._elapsed_seconds()
+        milestones = (
+            (
+                repository.fallback_after_seconds,
+                "duration_fallback_threshold",
+                "목표 시간의 75% 도달로 미해결 finding 분리 기준 적용",
+            ),
+            (
+                repository.publish_priority_after_seconds,
+                "duration_publish_priority",
+                "목표 시간 임박으로 검증 완료 finding 우선 반영 기준 적용",
+            ),
+            (
+                repository.target_duration_seconds,
+                "duration_target_exceeded",
+                "목표 실행 시간 초과 후 미해결 finding 처리 계속",
+            ),
+        )
+        for threshold, event_type, message in milestones:
+            if elapsed < threshold:
+                continue
+            with StateStore(self.config.state_dir) as state:
+                recorded = state.has_event(jobs[0].id, event_type)
+                if event_type == "duration_target_exceeded":
+                    state.mark_overdue(tuple(job.id for job in jobs), reason)
+            if recorded:
+                continue
+            self._batch_event(
+                jobs,
+                event_type,
+                message,
+                self._duration_details(repository, reason),
+                notify=True,
+            )
 
     def _codex_repository(
         self, repository: RepositoryConfig
@@ -633,7 +725,10 @@ class FixWorker:
         repeated_contract_error: str | None = None
         repeated_contract_failures = 0
         while active:
-            self._remaining_timeout(repository.job_timeout_seconds)
+            self._remaining_timeout(repository.hard_timeout_seconds)
+            self._record_duration_milestones(
+                repository, active, previous_error or "batch edit in progress"
+            )
             self._batch_event(
                 active,
                 "batch_fix_started",
@@ -1882,7 +1977,10 @@ class FixWorker:
         repeated_error = retry_error
         repeated_failures = 1 if retry_error else 0
         while True:
-            self._remaining_timeout(repository.job_timeout_seconds)
+            self._remaining_timeout(repository.hard_timeout_seconds)
+            self._record_duration_milestones(
+                repository, (job,), retry_error or "finding edit in progress"
+            )
             iteration_job = replace(
                 job,
                 attempts=job.attempts + iteration - 1,

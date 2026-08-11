@@ -131,7 +131,10 @@ class RepositoryConfig:
     command_timeout_seconds: int
     codex_timeout_seconds: int
     harness_timeout_seconds: int
-    job_timeout_seconds: int
+    fallback_after_seconds: int
+    publish_priority_after_seconds: int
+    target_duration_seconds: int
+    hard_timeout_seconds: int
     setup_max_attempts: int
     setup_retry_delay_seconds: int
     max_attempts: int
@@ -361,6 +364,48 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
         execution.get("command_timeout_seconds", 1800),
         f"{context}.execution.command_timeout_seconds",
     )
+    if (
+        "job_timeout_seconds" in execution
+        and "target_duration_seconds" in execution
+    ):
+        raise FixAgentError(
+            f"{context}.execution cannot set both job_timeout_seconds and "
+            "target_duration_seconds"
+        )
+    target_duration_seconds = _positive_integer(
+        execution.get(
+            "target_duration_seconds", execution.get("job_timeout_seconds", 7200)
+        ),
+        f"{context}.execution.target_duration_seconds",
+    )
+    fallback_after_seconds = _positive_integer(
+        execution.get(
+            "fallback_after_seconds", max(1, target_duration_seconds * 3 // 4)
+        ),
+        f"{context}.execution.fallback_after_seconds",
+    )
+    publish_priority_after_seconds = _positive_integer(
+        execution.get(
+            "publish_priority_after_seconds",
+            max(1, target_duration_seconds * 11 // 12),
+        ),
+        f"{context}.execution.publish_priority_after_seconds",
+    )
+    hard_timeout_seconds = _positive_integer(
+        execution.get("hard_timeout_seconds", target_duration_seconds * 2),
+        f"{context}.execution.hard_timeout_seconds",
+    )
+    if not (
+        fallback_after_seconds
+        < publish_priority_after_seconds
+        < target_duration_seconds
+        < hard_timeout_seconds
+    ):
+        raise FixAgentError(
+            f"{context}.execution requires fallback_after_seconds < "
+            "publish_priority_after_seconds < target_duration_seconds < "
+            "hard_timeout_seconds"
+        )
     return RepositoryConfig(
         id=_required_string(raw, "id", context),
         github=github,
@@ -393,10 +438,10 @@ def _repository(raw: Any, base: Path, index: int) -> RepositoryConfig:
             ),
             f"{context}.execution.harness_timeout_seconds",
         ),
-        job_timeout_seconds=_positive_integer(
-            execution.get("job_timeout_seconds", 7200),
-            f"{context}.execution.job_timeout_seconds",
-        ),
+        fallback_after_seconds=fallback_after_seconds,
+        publish_priority_after_seconds=publish_priority_after_seconds,
+        target_duration_seconds=target_duration_seconds,
+        hard_timeout_seconds=hard_timeout_seconds,
         setup_max_attempts=_positive_integer(
             execution.get("setup_max_attempts", 3),
             f"{context}.execution.setup_max_attempts",

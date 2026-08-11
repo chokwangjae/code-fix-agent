@@ -185,7 +185,7 @@ worktree 정리는 push 후에도 실패할 수 있다. 에이전트는 이미 p
 
 ## 기록 위치
 
-`state_dir/jobs.db`의 `jobs`에는 finding과 사전·사후 판단 근거, 테스트, 직전 실패, 다음 시도 시각과 결과 commit을 보관한다. `batch_runs`에는 배치 상태, 시도 횟수, Codex 호출 수, token과 누적 실행 시간을 보관한다. `job_events`에는 worktree, target 이동, merge 충돌, 재시도, push와 정리 절차를 순서대로 남긴다. Discord 전송 커서와 전송 재시도 상태는 `discord_cursors`에 분리한다.
+`state_dir/jobs.db`의 `jobs`에는 finding과 사전·사후 판단 근거, 테스트, 직전 실패, 다음 시도 시각과 결과 commit을 보관한다. 2시간 목표를 넘긴 작업은 `timing_status = "overdue"`, `target_exceeded_at`, `overdue_reason`으로 구분한다. Crontrol payload의 `currentTimingStatus`, `currentOverdueReason`과 `runningJobs[].timingStatus`에서도 같은 값을 확인할 수 있다. `batch_runs`에는 배치 상태, 시도 횟수, Codex 호출 수, token과 누적 실행 시간을 보관한다. `job_events`에는 시간 단계, worktree, target 이동, merge 충돌, 재시도, push와 정리 절차를 순서대로 남긴다. Discord 전송 커서와 전송 재시도 상태는 `discord_cursors`에 분리한다.
 
 실제 실행 이력은 다음 명령으로 확인한다.
 

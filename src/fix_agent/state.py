@@ -41,6 +41,9 @@ class Job:
     batch_id: str | None
     fallback_finding: int
     execution_started_at: str | None
+    timing_status: str
+    target_exceeded_at: str | None
+    overdue_reason: str | None
     created_at: str
     updated_at: str
 
@@ -169,6 +172,9 @@ class StateStore:
                 batch_id TEXT,
                 fallback_finding INTEGER NOT NULL DEFAULT 0,
                 execution_started_at TEXT,
+                timing_status TEXT NOT NULL DEFAULT 'on_time',
+                target_exceeded_at TEXT,
+                overdue_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (repository, branch, fingerprint)
@@ -299,6 +305,9 @@ class StateStore:
             ("batch_id", "TEXT"),
             ("fallback_finding", "INTEGER NOT NULL DEFAULT 0"),
             ("execution_started_at", "TEXT"),
+            ("timing_status", "TEXT NOT NULL DEFAULT 'on_time'"),
+            ("target_exceeded_at", "TEXT"),
+            ("overdue_reason", "TEXT"),
         ):
             if name not in columns:
                 self.connection.execute(
@@ -562,6 +571,30 @@ class StateStore:
     ) -> None:
         with self.connection:
             self._insert_event(job_id, event_type, message, details or {})
+
+    def has_event(self, job_id: int, event_type: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM job_events WHERE job_id = ? AND event_type = ? LIMIT 1",
+            (job_id, event_type),
+        ).fetchone()
+        return row is not None
+
+    def mark_overdue(self, job_ids: tuple[int, ...], reason: str) -> None:
+        if not job_ids:
+            return
+        now = _now()
+        placeholders = ",".join("?" for _ in job_ids)
+        with self.connection:
+            self.connection.execute(
+                f"""
+                UPDATE jobs
+                SET timing_status = 'overdue',
+                    target_exceeded_at = COALESCE(target_exceeded_at, ?),
+                    overdue_reason = ?, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (now, reason[:4_000], now, *job_ids),
+            )
 
     def discord_cursor(self, repository_id: str) -> DiscordCursor:
         row = self.connection.execute(

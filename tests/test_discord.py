@@ -71,6 +71,10 @@ class DiscordPayloadTest(unittest.TestCase):
             "result_validation_completed": "✅ 코드 수정 결과 검증 완료",
             "fix_iteration_failed": "🔄 코드 수정 보완 계속",
             "batch_fallback_started": "🔄 문제 finding 개별 처리 전환",
+            "duration_fallback_threshold": "⏱️ 지연 finding 분리 기준 적용",
+            "duration_publish_priority": "⏱️ 완료 수정 우선 반영",
+            "duration_target_exceeded": "⏱️ 목표 시간 초과 후 처리 계속",
+            "duration_hard_timeout": "❌ 최대 실행 시간 도달",
             "restart_recovery_scheduled": "🔄 코드 수정 재시작 복구",
             "retry_scheduled": "🔄 코드 수정 재시도 예정",
         }
