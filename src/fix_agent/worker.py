@@ -729,6 +729,29 @@ class FixWorker:
             self._record_duration_milestones(
                 repository, active, previous_error or "batch edit in progress"
             )
+            if (
+                previous_error
+                and self._elapsed_seconds() >= repository.fallback_after_seconds
+            ):
+                with StateStore(self.config.state_dir) as state:
+                    state.mark_finding_fallback_pending(
+                        tuple(job.id for job in active), previous_error
+                    )
+                pending_fallbacks.append(_PendingFallback(active, previous_error))
+                self._batch_event(
+                    active,
+                    "batch_fallback_started",
+                    "지연된 미해결 finding을 추가 batch 호출 없이 finding 모드로 분리",
+                    {
+                        "batch_id": batch.id,
+                        "fingerprints": [job.fingerprint for job in active],
+                        "reason": previous_error[:4_000],
+                        "elapsed_seconds": self._elapsed_seconds(),
+                        "threshold_seconds": repository.fallback_after_seconds,
+                    },
+                    notify=True,
+                )
+                return (), [], None, tuple(pending_fallbacks)
             self._batch_event(
                 active,
                 "batch_fix_started",
@@ -840,6 +863,84 @@ class FixWorker:
                 if not postcheck.resolved or not all(
                     decision.valid for decision in postcheck.findings
                 ):
+                    if (
+                        self._elapsed_seconds()
+                        >= repository.publish_priority_after_seconds
+                    ):
+                        resolved_groups, unresolved_groups = (
+                            _partition_validated_groups(postcheck)
+                        )
+                        unresolved_fingerprints = {
+                            fingerprint
+                            for group in unresolved_groups
+                            for fingerprint in group.fingerprints
+                        }
+                        if unresolved_fingerprints:
+                            unresolved_jobs = tuple(
+                                job
+                                for job in active
+                                if job.fingerprint in unresolved_fingerprints
+                            )
+                            unresolved_files = tuple(
+                                dict.fromkeys(
+                                    file
+                                    for group in unresolved_groups
+                                    for file in group.files
+                                )
+                            )
+                            workspace.discard_group_changes(unresolved_files)
+                            reason = (
+                                "publish priority threshold isolated unresolved "
+                                "finding groups: "
+                                + postcheck.reason
+                            )
+                            with StateStore(self.config.state_dir) as state:
+                                state.mark_finding_fallback_pending(
+                                    tuple(job.id for job in unresolved_jobs), reason
+                                )
+                            pending_fallbacks.append(
+                                _PendingFallback(unresolved_jobs, reason)
+                            )
+                            self._batch_event(
+                                unresolved_jobs,
+                                "batch_fallback_started",
+                                "목표 시간 임박으로 미해결 그룹을 분리하고 완료 그룹 우선 반영",
+                                {
+                                    "batch_id": batch.id,
+                                    "fingerprints": sorted(
+                                        unresolved_fingerprints
+                                    ),
+                                    "files": list(unresolved_files),
+                                    "reason": postcheck.reason[:4_000],
+                                    "elapsed_seconds": self._elapsed_seconds(),
+                                    "threshold_seconds": (
+                                        repository.publish_priority_after_seconds
+                                    ),
+                                },
+                                notify=True,
+                            )
+                        if resolved_groups and unresolved_groups:
+                            resolved_fingerprints = {
+                                fingerprint
+                                for group in resolved_groups
+                                for fingerprint in group.fingerprints
+                            }
+                            resolved_jobs = tuple(
+                                job
+                                for job in active
+                                if job.fingerprint in resolved_fingerprints
+                            )
+                            workspace.validate_diff(
+                                tuple(job.file for job in resolved_jobs)
+                            )
+                            return (
+                                resolved_groups,
+                                tests,
+                                postcheck,
+                                tuple(pending_fallbacks),
+                            )
+                        if unresolved_groups:
+                            return (), [], None, tuple(pending_fallbacks)
                     raise FixAgentError(
                         "batch fix did not pass independent validation: "
                         + postcheck.reason
@@ -917,7 +1018,14 @@ class FixWorker:
                         notify=True,
                     )
                     return (), [], None, tuple(pending_fallbacks)
-                if iteration >= 2 and groups:
+                if (
+                    groups
+                    and (
+                        iteration >= 2
+                        or self._elapsed_seconds()
+                        >= repository.fallback_after_seconds
+                    )
+                ):
                     problem = self.agent.diagnose_batch_failure(
                         self._codex_repository(repository),
                         active,
@@ -2292,6 +2400,28 @@ def _test_failure_error(
             f"- {command} (exit {test.get('returncode')}): {output[-2_000:]}"
         )
     return "\n".join(lines)[:10_000]
+
+
+def _partition_validated_groups(
+    decision: BatchFixDecision,
+) -> tuple[tuple[BatchChangeGroup, ...], tuple[BatchChangeGroup, ...]]:
+    valid = {
+        finding.fingerprint
+        for finding in decision.findings
+        if finding.valid
+    }
+    resolved: list[BatchChangeGroup] = []
+    unresolved: list[BatchChangeGroup] = []
+    for group in decision.groups:
+        target = (
+            resolved
+            if set(group.fingerprints).issubset(valid)
+            else unresolved
+        )
+        target.append(group)
+    if not decision.resolved and not unresolved:
+        return (), decision.groups
+    return tuple(resolved), tuple(unresolved)
 
 
 def _host_operating_system() -> str:

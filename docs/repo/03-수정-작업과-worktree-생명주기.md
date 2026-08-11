@@ -96,6 +96,17 @@ commit과 push는 변경 그룹별로 나눈다. 서버는 Codex 호출 전에 f
 
 반복 실패 원인이 특정 그룹으로 좁혀지면 해당 그룹의 변경을 worktree에서 되돌리고 그 fingerprint만 `fallback_pending`으로 바꾼다. 이 상태는 일반 worker가 claim하지 않는다. 나머지 배치는 같은 worktree에서 계속 보완한다. 배치 worktree 제거와 `git worktree prune`이 끝나면 `queued`로 바꿔 기존 finding 처리 대기열에 공개한다. 전환 과정은 `batch_finding_fallback_pending`, `batch_fallback_started`, `worktree_removed`, `batch_finding_fallback` 순서로 기록한다. 프로세스가 pending 상태에서 중단되면 재기동 복구가 개별 finding worktree 생성을 예약한다.
 
+시간 기준은 최초 batch claim 시각을 사용하며 재시작이나 push 재시도에서 초기화하지 않는다.
+
+| 기본 경과 시간 | 처리 |
+|---|---|
+| 5400초 | 실패 응답의 문제 그룹 즉시 분리. 이전 실패를 가진 재개 batch는 추가 전체 수정 호출 없이 미해결 finding을 개별 처리로 전환 |
+| 6600초 | 독립 결과 검증을 통과한 그룹의 변경만 유지하고 commit·push 우선 처리. 미해결 그룹은 변경을 되돌린 뒤 개별 처리로 전환 |
+| 7200초 | `overdue` 상태와 사유 기록 후 처리 계속 |
+| 14400초 | worktree와 commit checkpoint 보존 후 재시도 없는 중단 |
+
+같은 파일을 지목하거나 지원 파일을 공유하는 finding은 하나의 그룹으로 합쳐져 있으므로 6600초 분리에서도 함께 반영하거나 함께 되돌린다. batch 전체 검증에서 모든 fingerprint가 유효하지만 전체 회귀만 남은 경우에는 일부를 안전하게 가를 근거가 없으므로 전체를 개별 처리로 전환한다.
+
 `worktree_created`와 `worktree_resumed`에는 `scope = batch|finding`을 기록한다. fallback finding은 `batch` 범위 worktree를 재사용하지 않는다. 범위 정보가 없는 이전 event는 fallback event보다 앞선 경로를 배치 worktree로 보고 제외한다. `processing_mode = "finding"`은 finding마다 `fix-<random>` 디렉터리, detached worktree, fix commit과 push 이력을 만든다.
 
 `serve`는 `[server].max_concurrent_jobs`에 지정한 수만큼 worker를 실행하며 운영값은 `3`이다. 각 worker는 배치나 finding마다 worktree를 나눈다. 같은 저장소의 다른 worker가 원격 target을 먼저 갱신하면 뒤 작업은 자기 worktree에서 merge와 전체 재검증을 수행한다.
@@ -358,6 +369,8 @@ git -C /configured/local_path worktree list --porcelain
 | `message` | 짧은 설명 |
 | `details_json` | commit, 경로, 충돌 파일과 판단 사유 |
 | `created_at` | UTC ISO 8601 시각 |
+
+`duration_fallback_threshold`, `duration_publish_priority`, `duration_target_exceeded`, `duration_hard_timeout`은 시간 단계와 적용 사유를 기록한다. Discord가 활성화됐으면 같은 event를 통지하고 Crontrol의 현재 단계도 갱신한다.
 
 `batch_runs`는 `batch_id`, 상태, 시도 횟수, Codex 호출 수, 입력·cache·출력·reasoning·전체 token, 누적 실행 시간과 마지막 오류를 보관한다. worker는 Codex 호출이 끝날 때마다 호출 수와 token을 DB에 더하므로 다음 호출 중 프로세스가 종료되어도 앞선 사용량은 남는다. batch 시도가 끝나면 해당 시도의 wall time을 `duration_ms`에 더한다. token 값은 Codex JSONL의 `turn.completed.usage`를 사용한다. `total_tokens`가 없으면 `input_tokens + output_tokens`로 계산하며 `cached_input_tokens`는 입력 token에 다시 더하지 않는다. 지원되지 않는 항목은 `0`으로 남긴다.
 

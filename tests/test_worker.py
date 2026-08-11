@@ -214,6 +214,31 @@ class ContractFailureBatchAgent(BatchAgent):
         )
 
 
+class PartialBatchAgent(BatchAgent):
+    def validate_batch_fix(
+        self, repository, jobs, groups, workspace, environment, workspace_base
+    ):
+        self.result_validation_calls += 1
+        invalid = jobs[-1].fingerprint
+        decisions = tuple(
+            BatchFindingDecision(
+                job.fingerprint,
+                job.fingerprint != invalid,
+                "resolved" if job.fingerprint != invalid else "still failing",
+            )
+            for job in jobs
+        )
+        titled = tuple(
+            BatchChangeGroup(
+                group.fingerprints,
+                group.files,
+                f"fix(batch): {group.files[0]} 동작 수정",
+            )
+            for group in groups
+        )
+        return BatchFixDecision(False, "one group remains unresolved", decisions, titled)
+
+
 class MovingBatchAgent(BatchAgent):
     def __init__(self, repository_path: Path) -> None:
         super().__init__()
@@ -741,6 +766,46 @@ test_commands = []
         )
         self.assertIn('"scope": "batch"', created.details_json)
 
+    def test_duration_threshold_avoids_repeating_failed_batch_call(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, target = WorkspaceTest._repository(root)
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+processing_mode = "review_batch"
+github_token = "test-only-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            self._queue(config, baseline, target)
+            agent = ContractFailureBatchAgent()
+            worker = LocalBatchPushWorker(config, CommandRunner(), agent)
+
+            with patch.object(worker, "_elapsed_seconds", return_value=5400):
+                self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                queued = state.jobs()[0]
+                event_types = [event.event_type for event in state.events(queued.id)]
+
+        self.assertEqual(agent.fix_calls, 1)
+        self.assertEqual(queued.status, "queued")
+        self.assertEqual(queued.fallback_finding, 1)
+        self.assertIn("duration_fallback_threshold", event_types)
+        self.assertIn("batch_fallback_started", event_types)
+
     def test_repairs_permissions_changed_by_fix_before_harness(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1153,6 +1218,99 @@ git_author_email = "g_uapm@inswave.com"
             sum(event.event_type == "worktree_created" for event in batch_events),
             1,
         )
+
+    def test_publish_priority_pushes_resolved_group_and_falls_back_unresolved(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository_path, baseline, app_target = WorkspaceTest._repository(root)
+            (repository_path / "src/other.py").write_text(
+                "other defect\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "add", "src/other.py"], cwd=repository_path, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "second target"],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+            )
+            target = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "push", "origin", "main"],
+                cwd=repository_path,
+                check=True,
+                capture_output=True,
+            )
+            config_path = root / "fix.toml"
+            config_path.write_text(
+                f"""
+version = 1
+state_dir = ".state"
+[server]
+token = "test-token"
+[[repositories]]
+id = "repo"
+github = "owner/repo"
+target_branch = "main"
+local_path = "{repository_path}"
+publish_mode = "direct"
+processing_mode = "review_batch"
+github_token = "test-only-token"
+test_commands = []
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            review = parse_review_event(
+                {
+                    "version": 1,
+                    "repository": "owner/repo",
+                    "branch": "main",
+                    "baseline": baseline,
+                    "target": target,
+                    "findings": [
+                        {
+                            "fingerprint": "sha256:" + character * 64,
+                            "severity": "Major",
+                            "commit": introducing_commit,
+                            "file": file,
+                            "line": 1,
+                            "cause": f"Defect {character}",
+                            "solution": f"Fix {character}",
+                        }
+                        for character, file, introducing_commit in (
+                            ("c", "src/app.py", app_target),
+                            ("d", "src/other.py", target),
+                        )
+                    ],
+                }
+            )
+            with StateStore(config.state_dir) as state:
+                state.accept(config.repositories[0], review)
+            agent = PartialBatchAgent()
+            worker = LocalBatchPushWorker(config, CommandRunner(), agent)
+
+            with patch.object(worker, "_elapsed_seconds", return_value=6600):
+                self.assertTrue(worker.run_once())
+            with StateStore(config.state_dir) as state:
+                jobs = sorted(state.jobs(), key=lambda item: item.id)
+                event_types = [event.event_type for event in state.events()]
+
+        self.assertEqual(jobs[0].status, "completed")
+        self.assertIsNotNone(jobs[0].result_commit)
+        self.assertEqual(jobs[1].status, "queued")
+        self.assertEqual(jobs[1].fallback_finding, 1)
+        self.assertIsNone(jobs[1].result_commit)
+        self.assertEqual(worker.pushed_branches, ["main"])
+        self.assertIn("duration_publish_priority", event_types)
+        self.assertIn("batch_fallback_started", event_types)
 
     def test_review_batch_revalidates_all_results_after_target_moves(self) -> None:
         with TemporaryDirectory() as directory:

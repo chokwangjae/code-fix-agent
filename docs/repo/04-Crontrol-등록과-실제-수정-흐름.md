@@ -134,6 +134,10 @@ Crontrol 버전 변경 시 해당 프로젝트의 `docs/repo/02-연동가이드.
    - 결과와 근거를 `postcheck_status`, `postcheck_reason`에 기록
    - Crontrol 단계를 정책 검증, 테스트, 수정 결과 검증 순서로 갱신
    - 반복 실패 finding은 `fallback_pending`으로 격리하고 배치 worktree 정리 후 개별 처리로 전환
+   - 5400초 이후에는 반복 실패 그룹을 첫 진단에서 분리하고 이전 실패가 남은 재개 batch의 전체 수정 호출 생략
+   - 6600초 이후에는 독립 검증 완료 그룹만 유지해 우선 반영하고 미해결 그룹의 변경을 되돌린 뒤 개별 처리로 전환
+   - 7200초 이후에는 `overdue`와 사유를 기록하되 수정 계속
+   - 14400초 도달 시 worktree와 commit checkpoint를 보존하고 중단
    - `batch_fallback_started` event에서 `문제 finding 분리 중`으로 갱신
 8. commit 생성과 원격 재확인
    - 같은 파일 finding 묶음과 배정된 지원 파일을 commit 하나로 생성
